@@ -108,6 +108,7 @@ enum ServiceCommand {
 }
 #[tokio::main]
 async fn main() {
+    enso::slack::install_tls_provider();
     let cli = Cli::parse();
     let json = cli.json;
     if let Err(error) = execute(cli).await {

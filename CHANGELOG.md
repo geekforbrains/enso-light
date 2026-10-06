@@ -5,6 +5,11 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Enso connects to Slack Socket Mode. In 0.1.0, every build panicked while
+  opening the connection, so a running service never received messages.
+
 ## [0.1.0] - 2026-10-06
 
 First public release of Enso Light, the standalone Rust Slack-to-CLI service.

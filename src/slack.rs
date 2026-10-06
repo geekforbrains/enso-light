@@ -17,6 +17,13 @@ use crate::config::{Destination, SlackConfig};
 const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_FILES: usize = 20;
 
+/// Select ring as the process TLS provider before any Socket Mode connection.
+/// Dependencies enable both rustls backends, so rustls cannot choose one itself
+/// and the WebSocket client would panic. Later calls are no-ops.
+pub fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[derive(Clone)]
 pub struct Slack {
     config: SlackConfig,
@@ -775,6 +782,16 @@ mod tests {
             value["event"]["thread_ts"] = json!(thread);
         }
         value
+    }
+
+    #[test]
+    fn tls_provider_allows_default_client_configs() {
+        install_tls_provider();
+        install_tls_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        // The Socket Mode client builds its TLS config this way; it panicked
+        // when both rustls backends were enabled and none was installed.
+        let _ = rustls::ClientConfig::builder();
     }
 
     #[tokio::test]

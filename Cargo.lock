@@ -568,6 +568,7 @@ dependencies = [
  "pulldown-cmark",
  "reqwest 0.12.28",
  "rusqlite",
+ "rustls",
  "self_update",
  "serde",
  "serde_json",
