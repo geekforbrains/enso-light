@@ -73,6 +73,7 @@ Other optional Slack settings:
 | `queued_message` | Acknowledges a turn queued behind another |
 | `timeout_message` | Explains that a turn timed out |
 | `notify` | Optional default `{ "channel": "D012345", "thread": null }` destination for background sends |
+| `user_token` | Optional user OAuth token for workspace message search; omit unless configured |
 
 ## Environment
 
@@ -87,6 +88,7 @@ environment. Substitution happens once, with no shell evaluation; missing
 variables are errors. Quote literal values in `.env` using standard dotenv
 syntax. Never put credentials in prompts, starter guidance, or source control.
 Restart after changing `config.json` or `.env`.
+Direct `enso slack` commands reload these files on each invocation.
 
 ## Slack app
 
@@ -103,3 +105,26 @@ Only one service should consume the same Socket Mode app token. Enso preserves
 Slack event IDs to ignore duplicate deliveries. Use `enso service status` to
 check both the service and Slack connection; process startup alone is not a
 successful Slack connection.
+
+The [Slack CLI commands](cli.md#slack-lookup-and-reactions) use the bot token for
+channel/user lookup, history, threads, links, and reactions. These operations
+need the matching read/history or `reactions:write` scopes and access to the
+conversation. Group DMs additionally use `mpim:read` and `mpim:history`.
+Incoming `dm_users` and `channels` settings control which messages start agent
+turns; they do not restrict direct Web API lookups or reactions.
+
+## Workspace search
+
+Search without `--channel` uses Slack's `search.messages` method, which requires
+a **user OAuth token** with `search:read`. Its results follow that user's Slack
+access and search settings. [Slack's method reference](https://docs.slack.dev/reference/methods/search.messages/)
+documents the supported query and pagination behavior.
+
+To enable it, add `"user_token": "${SLACK_USER_TOKEN}"` to `slack` in
+`config.json`, then set `SLACK_USER_TOKEN` in `.env`. Keep it absent when no
+authorized user token is available. Adding this optional key does not change
+the bot token or Socket Mode connection.
+
+The existing bot setup is enough for `search --channel CHANNEL`, which scans
+one page of accessible history with a literal text filter. That operation does
+not enable workspace-wide Slack search; pass the returned cursor to scan more.

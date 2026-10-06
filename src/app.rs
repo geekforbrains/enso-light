@@ -57,6 +57,7 @@ fn redact(error: &str, env: &BTreeMap<String, String>, config: &Config) -> Strin
     for secret in env
         .values()
         .chain([&config.slack.bot_token, &config.slack.app_token])
+        .chain(config.slack.user_token.iter())
     {
         if secret.len() >= 4 {
             result = result.replace(secret, "[redacted]");

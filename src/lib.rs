@@ -7,3 +7,4 @@ pub mod jobs;
 pub mod runner;
 pub mod service;
 pub mod slack;
+pub mod slack_cli;

@@ -17,6 +17,10 @@ Start with one permitted DM user. Enso accepts no conversations until you config
 the allowlist. DMs share one session; channel threads get separate sessions.
 Slack controls: `!clear`, `!stop`, `!status`, and `!help`.
 
+Agents can use `enso slack` to inspect channels, users, history, and threads,
+search messages, get links, and manage reactions. These commands call Slack
+directly; outgoing messages use `enso message send` for tracked delivery.
+
 - [Configuration and Slack setup](docs/configuration.md)
 - [Jobs and hooks](docs/jobs.md)
 - [CLI and installation](docs/cli.md)

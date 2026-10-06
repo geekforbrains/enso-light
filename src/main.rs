@@ -5,6 +5,8 @@ use enso::{
     config::{self, Destination},
     db::Db,
     jobs, service,
+    slack::Slack,
+    slack_cli,
 };
 use serde_json::{Value, json};
 use std::{
@@ -43,6 +45,11 @@ enum Command {
     Message {
         #[command(subcommand)]
         command: MessageCommand,
+    },
+    /// Read Slack conversations and users, search messages, and manage reactions.
+    Slack {
+        #[command(subcommand)]
+        command: slack_cli::SlackCommand,
     },
     Service {
         #[command(subcommand)]
@@ -146,6 +153,11 @@ async fn execute(cli: Cli) -> Result<()> {
             );
         }
         Command::Run => app::run(home).await?,
+        Command::Slack { command } => {
+            let loaded = config::load(&home)?;
+            let slack = Slack::new(&loaded.config.slack)?;
+            print(&slack_cli::execute(command, slack).await?, cli.json);
+        }
         Command::Config {
             command: ConfigCommand::Check,
         } => {

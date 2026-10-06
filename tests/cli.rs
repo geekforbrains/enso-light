@@ -160,3 +160,33 @@ fn invalid_existing_configuration_is_not_reseeded_by_init() {
     assert!(!directory.path().join("workspace").exists());
     assert!(!directory.path().join("enso.db").exists());
 }
+
+#[test]
+fn slack_search_without_user_token_fails_locally_without_requiring_a_daemon() {
+    let directory = configured_home();
+    let result = enso(directory.path(), &["slack", "search", "planning"]);
+    assert!(!result.status.success());
+    let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains("user_token"), "{message}");
+    assert!(message.contains("search:read"), "{message}");
+    assert!(!message.contains("not running"));
+    assert!(!message.contains("fake-bot-token"));
+    assert!(!message.contains("fake-app-token"));
+}
+
+#[test]
+fn slack_rejects_unbounded_pages_and_unscoped_thread_search_before_config_load() {
+    // An uninitialized home guarantees these checks run in argument parsing,
+    // before configuration, credentials, or network requests are involved.
+    let directory = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["slack", "history", "D012345", "--limit", "0"],
+        vec!["slack", "channels", "--limit", "201"],
+        vec!["slack", "search", "word", "--thread", "1234567890.123456"],
+    ] {
+        let result = enso(directory.path(), &args);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("init first"));
+    }
+}

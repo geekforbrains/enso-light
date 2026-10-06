@@ -1,6 +1,6 @@
 ---
 name: enso
-description: Use Enso's Slack messaging, attachments, scheduled jobs, and local CLI from its shared workspace.
+description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, and local CLI from its shared workspace.
 ---
 
 # Enso
@@ -12,6 +12,32 @@ DMs share one session, including DM threads. Channel threads have separate sessi
 For Slack turns, your final response is sent automatically to the current reply
 destination. Use ordinary Markdown. Do not send that same answer again with the CLI.
 Incoming attachments are local files under `uploads/`; inspect the supplied paths.
+
+## Read Slack context
+
+```sh
+enso slack channels
+enso slack users
+enso slack history C012345 --limit 20
+enso slack thread C012345 '1791295200.000100'
+enso slack message C012345 '1791295300.000200' --thread '1791295200.000100'
+enso slack search "release notes" --channel C012345
+enso slack link C012345 '1791295200.000100'
+enso slack react C012345 '1791295200.000100' eyes
+```
+
+These return JSON directly from configured Slack access; no running service is
+needed. Use `channel ID` or `user ID` for details and `react ... --remove` to
+remove a reaction. Preserve timestamps as strings. Follow returned cursors for
+more channel, user, history, thread, or search results.
+
+`search --channel` filters one history page using a literal, case-insensitive
+match; add `--thread ROOT_TS` for a thread. Check scanned count and coverage,
+then paginate before treating absence as conclusive. Channel history excludes
+thread replies that were not returned; inspect those threads separately.
+Search without `--channel`
+uses Slack query syntax and needs an optional user token with `search:read`;
+do not assume the bot's existing credentials support workspace search.
 
 ## Send additional messages or files
 

@@ -101,9 +101,18 @@ impl Slack {
         } else {
             &self.config.bot_token
         };
+        ensure!(
+            !token.trim().is_empty(),
+            "Slack {} is not configured",
+            if app_token { "app_token" } else { "bot_token" }
+        );
+        self.request_with_token(method, body, token).await
+    }
+
+    async fn request_with_token(&self, method: &str, body: &Value, token: &str) -> Result<Value> {
         for attempt in 0..3 {
             let address = format!("{}/{method}", self.base);
-            let request = if matches!(method, "files.info" | "users.info" | "conversations.info") {
+            let request = if read_method(method) || method == "search.messages" {
                 self.http.get(&address).query(body)
             } else {
                 self.http.post(&address).json(body)
@@ -149,6 +158,29 @@ impl Slack {
         let value = self.request(method, body, false).await?;
         check_api(method, &value)?;
         Ok(value)
+    }
+
+    /// Only explicitly supported Web API reads are exposed to the CLI.
+    pub(crate) async fn read(&self, method: &str, params: &Value) -> Result<Value> {
+        ensure!(read_method(method), "Unsupported Slack read method");
+        self.api(method, params).await
+    }
+
+    pub(crate) async fn search_messages(&self, params: &Value) -> Result<Value> {
+        let token = self.config.user_token.as_deref().filter(|token| !token.trim().is_empty())
+            .context("Workspace search requires slack.user_token with search:read. Configure it in config.json using ${SLACK_USER_TOKEN}, or use search --channel CHANNEL to search one bot-accessible history page.")?;
+        let response = self
+            .request_with_token("search.messages", params, token)
+            .await?;
+        check_api("search.messages", &response)?;
+        Ok(response)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_endpoint(config: &SlackConfig, base: String) -> Self {
+        let mut slack = Self::new(config).unwrap();
+        slack.base = base;
+        slack
     }
 
     pub async fn identity(&self) -> Result<Identity> {
@@ -597,6 +629,20 @@ fn required<'a>(value: &'a Value, field: &str, context: &str) -> Result<&'a str>
         .with_context(|| format!("{context}: missing {field}"))
 }
 
+fn read_method(method: &str) -> bool {
+    matches!(
+        method,
+        "files.info"
+            | "users.info"
+            | "users.list"
+            | "conversations.info"
+            | "conversations.list"
+            | "conversations.history"
+            | "conversations.replies"
+            | "chat.getPermalink"
+    )
+}
+
 fn check_api(method: &str, value: &Value) -> Result<()> {
     if value["ok"] == true {
         return Ok(());
@@ -606,6 +652,41 @@ fn check_api(method: &str, value: &Value) -> Result<()> {
         .as_str()
         .filter(|s| s.len() < 80 && s.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
         .unwrap_or("unknown_error");
+    if code == "missing_scope" {
+        let scopes = match method {
+            "search.messages" => "search:read on slack.user_token",
+            "conversations.history" | "conversations.replies" => {
+                "channels:history, groups:history, im:history or mpim:history on the bot token, matching the conversation type"
+            }
+            "conversations.list" | "conversations.info" => {
+                "channels:read, groups:read, im:read or mpim:read on the bot token, matching the conversation types"
+            }
+            "users.list" | "users.info" => "users:read on the bot token",
+            "reactions.add" | "reactions.remove" => "reactions:write on the bot token",
+            "files.info" => "files:read on the bot token",
+            "files.getUploadURLExternal" | "files.completeUploadExternal" => {
+                "files:write on the bot token"
+            }
+            "chat.postMessage" => "chat:write on the bot token",
+            _ => "the method's required Slack scopes",
+        };
+        bail!(
+            "Slack {method} failed (missing_scope). Grant {scopes}, then reinstall or reauthorize the Slack app."
+        );
+    }
+    if matches!(
+        code,
+        "no_permission" | "not_in_channel" | "channel_not_found" | "access_denied"
+    ) {
+        bail!(
+            "Slack {method} failed ({code}). Check the conversation ID and token's access; invite the bot to the channel when using bot commands."
+        );
+    }
+    if method == "search.messages" && code == "not_allowed_token_type" {
+        bail!(
+            "Slack search.messages requires a user token with search:read in slack.user_token; bot tokens cannot perform workspace search."
+        );
+    }
     if matches!(
         code,
         "internal_error" | "fatal_error" | "service_unavailable"

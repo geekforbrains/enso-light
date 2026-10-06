@@ -1,7 +1,9 @@
 # Runtime and development
 
 The service owns one Slack Socket Mode connection, a shared CLI runner, job
-scheduling, and outgoing delivery. CLI commands submit work through SQLite.
+scheduling, and outgoing delivery. Job triggers and message sends submit work
+through SQLite. `enso slack` lookups and reactions call the Web API directly and
+do not need the service; reactions do not enter the message delivery queue.
 There is no local HTTP server or extra broker.
 
 `config.json`, `.env`, and job directories own configuration. `enso.db` owns

@@ -4,6 +4,23 @@ use std::{fs, os::unix::fs::PermissionsExt};
 
 const SESSION: &str = "00000000-0000-0000-0000-000000000123";
 
+#[test]
+fn runtime_errors_redact_literal_search_credentials_and_environment_values() {
+    let mut config = Config::default();
+    config.slack.bot_token = "fake-bot-credential".into();
+    config.slack.app_token = "fake-app-credential".into();
+    config.slack.user_token = Some("fake-user-credential".into());
+    let env = BTreeMap::from([("PROVIDER_SECRET".into(), "fake-provider-credential".into())]);
+    assert_eq!(
+        redact(
+            "failure: fake-bot-credential fake-app-credential fake-user-credential fake-provider-credential",
+            &env,
+            &config,
+        ),
+        "failure: [redacted] [redacted] [redacted] [redacted]",
+    );
+}
+
 struct Fixture {
     home: tempfile::TempDir,
     db: Db,

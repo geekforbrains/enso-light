@@ -74,6 +74,8 @@ impl Default for Mentions {
 pub struct SlackConfig {
     pub bot_token: String,
     pub app_token: String,
+    /// Optional user OAuth token for Slack's workspace search API only.
+    pub user_token: Option<String>,
     pub dm_users: Vec<String>,
     pub channels: BTreeMap<String, Mentions>,
     pub mentions: Mentions,
@@ -88,6 +90,7 @@ impl Default for SlackConfig {
         Self {
             bot_token: String::new(),
             app_token: String::new(),
+            user_token: None,
             dm_users: Vec::new(),
             channels: BTreeMap::new(),
             mentions: Mentions::default(),
@@ -363,6 +366,27 @@ mod tests {
         assert_eq!(loaded.config.slack.app_token, "app");
         assert_eq!(loaded.env["SLACK_APP_TOKEN"], "app");
         assert!(loaded.config.slack.dm_users.is_empty());
+        assert!(loaded.config.slack.user_token.is_none());
+    }
+
+    #[test]
+    fn optional_search_token_uses_normal_environment_substitution() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(".env"),
+            "SLACK_USER_TOKEN=fake-search-user-token\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("config.json"),
+            r#"{"slack":{"user_token":"${SLACK_USER_TOKEN}"}}"#,
+        )
+        .unwrap();
+        let loaded = load(temp.path()).unwrap();
+        assert_eq!(
+            loaded.config.slack.user_token.as_deref(),
+            Some("fake-search-user-token")
+        );
     }
 
     #[test]
