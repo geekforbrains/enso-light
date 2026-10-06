@@ -58,7 +58,7 @@ fn init_creates_guidance_and_database_without_overwriting_local_content() {
         "config.json",
         ".env",
         "workspace/AGENTS.md",
-        "workspace/.skills/enso/SKILL.md",
+        "skills/enso/SKILL.md",
     ] {
         assert!(home.join(name).is_file(), "missing {name}");
     }
@@ -69,10 +69,16 @@ fn init_creates_guidance_and_database_without_overwriting_local_content() {
         fs::read_link(home.join("workspace/CLAUDE.md")).unwrap(),
         Path::new("AGENTS.md")
     );
+    for tool in [".agents", ".claude"] {
+        assert_eq!(
+            fs::read_link(home.join("workspace").join(tool).join("skills")).unwrap(),
+            Path::new("../../skills")
+        );
+    }
     let custom_agents = "# Local identity\nKeep this exact text.\n";
     let custom_skill = "# Local Enso skill\nKeep this exact skill.\n";
     fs::write(home.join("workspace/AGENTS.md"), custom_agents).unwrap();
-    fs::write(home.join("workspace/.skills/enso/SKILL.md"), custom_skill).unwrap();
+    fs::write(home.join("skills/enso/SKILL.md"), custom_skill).unwrap();
     fs::write(home.join("workspace/personal.txt"), "Keep personal files.").unwrap();
     let original_config = fs::read(home.join("config.json")).unwrap();
     let original_env = fs::read(home.join(".env")).unwrap();
@@ -84,7 +90,7 @@ fn init_creates_guidance_and_database_without_overwriting_local_content() {
         custom_agents
     );
     assert_eq!(
-        fs::read_to_string(home.join("workspace/.skills/enso/SKILL.md")).unwrap(),
+        fs::read_to_string(home.join("skills/enso/SKILL.md")).unwrap(),
         custom_skill
     );
     assert_eq!(

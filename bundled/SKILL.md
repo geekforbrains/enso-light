@@ -1,6 +1,6 @@
 ---
 name: enso
-description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, and local CLI from its shared workspace.
+description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, and local CLI
 ---
 
 # Enso

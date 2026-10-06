@@ -7,10 +7,13 @@ The default home is `~/.enso`; `--home PATH` selects another home.
 ├── config.json
 ├── .env
 ├── enso.db
+├── skills/
+│   └── enso/SKILL.md
 ├── workspace/
 │   ├── AGENTS.md
 │   ├── CLAUDE.md -> AGENTS.md
-│   ├── .skills/enso/SKILL.md
+│   ├── .agents/skills -> ../../skills
+│   ├── .claude/skills -> ../../skills
 │   └── uploads/
 ├── jobs/
 └── logs/
@@ -19,6 +22,8 @@ The default home is `~/.enso`; `--home PATH` selects another home.
 `enso init` creates missing directories and starter files without overwriting
 existing content. Credentials and generated files use private permissions. All
 agent processes run in `workspace/`; job hooks run in their job's directory.
+`skills/` holds agent skills; Claude Code and Codex find them through the
+workspace links. Add your own skills beside `enso`.
 
 ## config.json
 

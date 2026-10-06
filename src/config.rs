@@ -261,8 +261,10 @@ pub fn init(home: &Path) -> Result<()> {
         "",
         "workspace",
         "workspace/uploads",
-        "workspace/.skills",
-        "workspace/.skills/enso",
+        "workspace/.agents",
+        "workspace/.claude",
+        "skills",
+        "skills/enso",
         "jobs",
         "logs",
     ] {
@@ -285,12 +287,19 @@ pub fn init(home: &Path) -> Result<()> {
         include_str!("../bundled/AGENTS.md"),
     )?;
     create_file(
-        &home.join("workspace/.skills/enso/SKILL.md"),
+        &home.join("skills/enso/SKILL.md"),
         include_str!("../bundled/SKILL.md"),
     )?;
-    let claude = home.join("workspace/CLAUDE.md");
-    if fs::symlink_metadata(&claude).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-        symlink("AGENTS.md", claude)?;
+    // Claude Code and Codex share one instruction file and one skills directory.
+    for (target, link) in [
+        ("AGENTS.md", "workspace/CLAUDE.md"),
+        ("../../skills", "workspace/.agents/skills"),
+        ("../../skills", "workspace/.claude/skills"),
+    ] {
+        let link = home.join(link);
+        if fs::symlink_metadata(&link).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+            symlink(target, link)?;
+        }
     }
     Ok(())
 }
@@ -337,11 +346,11 @@ mod tests {
             fs::read_link(temp.path().join("workspace/CLAUDE.md")).unwrap(),
             Path::new("AGENTS.md")
         );
-        assert!(
-            temp.path()
-                .join("workspace/.skills/enso/SKILL.md")
-                .is_file()
-        );
+        for tool in [".agents", ".claude"] {
+            let skills = temp.path().join("workspace").join(tool).join("skills");
+            assert_eq!(fs::read_link(&skills).unwrap(), Path::new("../../skills"));
+            assert!(skills.join("enso/SKILL.md").is_file());
+        }
         assert_eq!(
             fs::metadata(temp.path().join(".env"))
                 .unwrap()
