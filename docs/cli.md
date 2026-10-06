@@ -51,10 +51,11 @@ Receipts include delivery state and a Slack reference: a message timestamp for
 text, or a remote file ID for attachments. File receipts also include
 `message_ts` when Slack has exposed the associated message; successful upload
 does not depend on that optional timestamp being available immediately.
-An explicit destination wins; otherwise the current chat's reply destination,
-job notification destination, or configured Slack notification destination is
-used. A missing destination is an error. Confirmed background sends become
-context for the next conversation turn.
+An explicit destination wins; otherwise a Slack turn replies to its
+conversation and a job posts to its `notify` destination. Without either, such
+as in a terminal or a job without `notify`, `--to` is required. Destinations are
+Slack conversation IDs (`C…`, `G…`, or `D…`) and thread root timestamps. Confirmed background sends become context for the
+next conversation turn.
 
 Message text and replies are standard Markdown, which Slack renders in
 `markdown` blocks, including tables and task lists. Enso escapes `&` and `<`

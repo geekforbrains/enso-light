@@ -79,7 +79,7 @@ enum MessageCommand {
         /// Attach a file; repeat for multiple files.
         #[arg(long = "file")]
         files: Vec<PathBuf>,
-        /// Slack channel or DM ID. Defaults to the current run or configured notification target.
+        /// Slack channel or DM ID. Defaults to the current Slack conversation or the job's notify.
         #[arg(long)]
         to: Option<String>,
         #[arg(long)]
@@ -237,7 +237,6 @@ async fn execute(cli: Cli) -> Result<()> {
                 },
         } => {
             active(&home)?;
-            let loaded = config::load(&home)?;
             let mut body = match (text, text_file) {
                 (Some(text), _) => text,
                 (_, Some(path)) => {
@@ -267,18 +266,11 @@ async fn execute(cli: Cli) -> Result<()> {
                     }),
                 }
             } else {
-                let mut d = loaded.config.slack.notify.context(
-                    "No destination: supply --to CHANNEL or configure slack.notify / job.notify",
-                )?;
-                if thread.is_some() {
-                    d.thread = thread;
-                }
-                d
+                bail!(
+                    "No destination: supply --to CHANNEL; only Slack turns and jobs with notify have a default"
+                );
             };
-            ensure!(
-                !destination.channel.is_empty(),
-                "Destination channel must not be empty"
-            );
+            destination.validate()?;
             let db = Db::open(&home)?;
             let run = std::env::var("ENSO_RUN_ID")
                 .ok()

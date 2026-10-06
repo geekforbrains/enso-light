@@ -77,7 +77,6 @@ Other optional Slack settings:
 | `working_reaction` | `thinking_face` |
 | `queued_message` | Acknowledges a turn queued behind another |
 | `timeout_message` | Explains that a turn timed out |
-| `notify` | Optional default `{ "channel": "D012345", "thread": null }` destination for background sends |
 | `user_token` | Optional user OAuth token for workspace message search; omit unless configured |
 
 ## Environment

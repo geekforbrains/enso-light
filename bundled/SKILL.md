@@ -75,8 +75,9 @@ and labels at most 20. A pie chart uses
 `axis_config`. Blocks are sent as given, so mention syntax in them notifies
 people, and interactive callbacks such as button clicks are not handled.
 
-Without `--to`, Enso uses this run's reply or job notification target. Use an
-explicit destination for another conversation. The service must be running.
+Without `--to`, Enso uses this run's Slack conversation or the job's `notify`
+destination. Use an explicit destination for another conversation. The service
+must be running.
 Only send additional/background messages when the user's request calls for them.
 
 ## Jobs
@@ -93,7 +94,11 @@ the calling turn ends. A job already queued or running skips scheduled
 occurrences without catch-up and rejects additional manual triggers.
 
 Jobs live at `$ENSO_HOME/jobs/JOB/`. A required `prompt.md` is the user request;
-`job.json` sets `cron`, `enabled`, optional `execution` overrides and `notify`.
+`job.json` sets `cron`, `enabled`, optional `execution` overrides, and optional
+`notify`: where the job posts, `{"channel":"C…"}` for a channel or `D…` for a DM,
+plus `"thread":"TS"` for a thread. Omit it for a job that never posts. "Here"
+means this run's reply channel, and its thread only when the user means this
+thread; find other IDs with `enso slack channels`.
 Runs use the shared workspace and fresh native sessions. Optional `prerun.sh` and
 `postrun.sh` run with Bash from the job directory. Prerun stdout provides JSON;
 return `{"vars":{"NAME":"value"}}` to expand `{{NAME}}` in the prompt or

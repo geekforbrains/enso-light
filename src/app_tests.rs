@@ -59,7 +59,6 @@ impl Fixture {
         let mut config = loaded.config;
         config.execution.executable = Some(executable.to_string_lossy().into_owned());
         config.execution.timeout_seconds = 5;
-        config.slack.notify = None;
         let db = Db::open(home.path()).unwrap();
         let slack = Slack::new(&config.slack).unwrap();
         Self {

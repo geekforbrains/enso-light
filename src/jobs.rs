@@ -123,10 +123,9 @@ pub fn load(home: &Path, name: &str, defaults: &Execution) -> Result<Job> {
         schedules(expression).with_context(|| format!("job {name}: invalid cron"))?;
     }
     if let Some(destination) = &definition.notify {
-        ensure!(
-            !destination.channel.trim().is_empty(),
-            "job {name}: notify.channel must not be empty"
-        );
+        destination
+            .validate()
+            .with_context(|| format!("job {name}: invalid notify"))?;
     }
     let prompt = fs::read_to_string(directory.join("prompt.md"))
         .with_context(|| format!("job {name}: prompt.md is required"))?;
@@ -356,6 +355,38 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].enabled && jobs[0].prerun && !jobs[0].postrun);
         assert!(load(temp.path(), "../other", &defaults()).is_err());
+    }
+
+    #[test]
+    fn job_destination_is_optional_but_must_be_a_channel_dm_or_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("jobs/report");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
+        let load_with = |definition: &str| {
+            fs::write(directory.join("job.json"), definition).unwrap();
+            load(temp.path(), "report", &defaults())
+        };
+        assert!(load_with("{}").unwrap().notify.is_none());
+        for invalid in [
+            r#"{"notify":{"channel":""}}"#,
+            r##"{"notify":{"channel":"#general"}}"##,
+            r#"{"notify":{"channel":"U012345"}}"#,
+            r#"{"notify":{"channel":"C012345","thread":""}}"#,
+            r#"{"notify":{"channel":"C012345","thread":"yesterday"}}"#,
+        ] {
+            assert!(load_with(invalid).is_err(), "{invalid}");
+        }
+        for channel in ["C012345", "G012345", "D012345"] {
+            let job = load_with(&format!(r#"{{"notify":{{"channel":"{channel}"}}}}"#)).unwrap();
+            assert_eq!(job.notify.unwrap().channel, channel);
+        }
+        let job =
+            load_with(r#"{"notify":{"channel":"C012345","thread":"1700000000.000001"}}"#).unwrap();
+        assert_eq!(
+            job.notify.unwrap().thread.as_deref(),
+            Some("1700000000.000001")
+        );
     }
 
     #[test]

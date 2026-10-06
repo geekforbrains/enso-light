@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -53,6 +53,36 @@ pub struct Destination {
     pub thread: Option<String>,
 }
 
+impl Destination {
+    /// Requires a Slack conversation ID and, for a thread, its root message timestamp.
+    pub fn validate(&self) -> Result<()> {
+        let id = self.channel.as_bytes();
+        ensure!(
+            id.len() > 1
+                && matches!(id[0], b'C' | b'D' | b'G')
+                && id
+                    .iter()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()),
+            "channel must be a Slack channel or DM ID such as C012345 or D012345, not {:?}",
+            self.channel
+        );
+        if let Some(thread) = &self.thread {
+            ensure!(
+                thread.split_once('.').is_some_and(|(seconds, fraction)| {
+                    !seconds.is_empty()
+                        && !fraction.is_empty()
+                        && seconds
+                            .bytes()
+                            .chain(fraction.bytes())
+                            .all(|b| b.is_ascii_digit())
+                }),
+                "thread must be a Slack message timestamp such as 1700000000.000001, not {thread:?}"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Mentions {
@@ -82,7 +112,6 @@ pub struct SlackConfig {
     pub working_reaction: String,
     pub queued_message: String,
     pub timeout_message: String,
-    pub notify: Option<Destination>,
 }
 
 impl Default for SlackConfig {
@@ -98,7 +127,6 @@ impl Default for SlackConfig {
             queued_message: "Queued — I’ll get to this after the current turn.".into(),
             timeout_message: "This turn timed out. You can send another message to continue."
                 .into(),
-            notify: None,
         }
     }
 }
@@ -123,14 +151,6 @@ impl Config {
         }
         if self.slack.working_reaction.is_empty() {
             bail!("slack.working_reaction must not be empty");
-        }
-        if self
-            .slack
-            .notify
-            .as_ref()
-            .is_some_and(|d| d.channel.is_empty())
-        {
-            bail!("slack.notify.channel must not be empty");
         }
         Ok(())
     }

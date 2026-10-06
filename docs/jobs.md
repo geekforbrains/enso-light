@@ -20,6 +20,12 @@ Names use letters, numbers, hyphens, and underscores. `prompt.md` must be nonemp
 }
 ```
 
+`notify` is optional: where the job posts when it sends a message. `channel` is a
+conversation ID (`C…` for a channel, `G…` for a private channel, `D…` for a DM).
+Add `"thread": "1700000000.000001"` with a root message timestamp to post in that
+thread. Enso checks the format when it loads the job; the bot must be able to post
+there. Leave it out for a job that never posts.
+
 `cron` uses five fields (minute, hour, day of month, month, day of week) and the
 machine's timezone. Omit it for a manual-only job. `enabled` defaults to true and
 controls scheduling; a disabled job can still be triggered manually.
@@ -50,7 +56,9 @@ inherit Enso's execution defaults and override individual fields. An explicit
 CLI-specific model, effort, executable, and arguments. `prompt.md` is required
 even when a prerun sometimes skips work. Final agent output is stored in SQLite;
 it is not automatically posted to Slack. Use `enso message send` from the agent
-or postrun when notification is wanted. `notify` supplies the default destination.
+or postrun when notification is wanted. Without `--to`, it posts to `notify`; a
+job without `notify` must name `--to`. Triggering a job from Slack does not change
+its destination.
 
 ## Hooks and variables
 
@@ -80,10 +88,11 @@ including failure, unless the run was cancelled. Timeouts and cancellation stop
 the running process group. Hook failure is visible in the job's outcome.
 
 Enso sets `ENSO_HOME`, `ENSO_RUN_ID`, `ENSO_SOURCE`, and `ENSO_JOB` for the agent
-and hooks. `ENSO_CHANNEL` and `ENSO_THREAD_TS` provide the resolved notification
-destination, or empty strings when none is configured. `ENSO_SOURCE` is `slack`
-or `job`; `ENSO_JOB` is empty on Slack turns. Enso owns these metadata variables
-and overrides conflicting values from the inherited environment or `.env`.
+and hooks. `ENSO_CHANNEL` and `ENSO_THREAD_TS` provide the Slack conversation or
+the job's `notify` destination, and are empty without one.
+`ENSO_SOURCE` is `slack` or `job`; `ENSO_JOB` is empty on Slack turns. Enso owns
+these metadata variables and overrides conflicting values from the inherited
+environment or `.env`.
 
 Job turns get separate guidance and metadata identifying the job, trigger,
 scheduled time, workspace, and notification destination. They never inherit a

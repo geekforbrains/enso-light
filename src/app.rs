@@ -429,9 +429,7 @@ async fn execute_inner(
     let target = if let Some(input) = incoming {
         Some(input.reply.clone())
     } else {
-        job.as_ref()
-            .and_then(|j| j.notify.clone())
-            .or_else(|| config.slack.notify.clone())
+        job.as_ref().and_then(|j| j.notify.clone())
     };
     if let Some(dest) = &target {
         env.insert("ENSO_CHANNEL".into(), dest.channel.clone());
