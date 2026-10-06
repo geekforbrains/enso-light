@@ -14,7 +14,10 @@ enso service start
 ```
 
 Start with one permitted DM user. Enso accepts no conversations until you configure
-the allowlist. DMs share one session; channel threads get separate sessions.
+the allowlist. Each DM shares one session across its threads; channel threads get
+separate sessions. Messages in a busy conversation queue behind its current turn.
+Different jobs and conversations run in parallel with no global concurrency limit
+or setting. Scheduled occurrences of an already busy job are skipped.
 Slack controls: `!clear`, `!stop`, `!status`, and `!help`.
 
 Agents can use `enso slack` to inspect channels, users, history, and threads,

@@ -37,7 +37,10 @@ enso jobs run morning-report --wait
 ```
 
 `--wait` waits for the job's result and can be used from a shell, agent, or hook.
-Without it, the command returns as soon as the job is queued.
+Without it, the command returns as soon as the job is queued. The service owns
+the submitted job, so it can continue after the calling shell or agent turn ends.
+Its completion does not resume the calling turn; send any requested notification
+from the job itself.
 Job definitions are reread each scheduler minute and at run start, so
 job-file changes need no restart. Changes to `config.json` or `.env` require one.
 

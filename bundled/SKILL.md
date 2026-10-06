@@ -8,6 +8,8 @@ description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, an
 Enso runs your installed agent CLI in one workspace. Each turn's injected context
 identifies Slack versus a job, the sender and destination, and local attachments.
 DMs share one session, including DM threads. Channel threads have separate sessions.
+Messages in a busy conversation queue in order. Different conversations and jobs
+run in parallel with no global concurrency limit or setting.
 
 For Slack turns, your final response is sent automatically to the current reply
 destination. Use ordinary Markdown. Do not send that same answer again with the CLI.
@@ -60,8 +62,10 @@ enso jobs run JOB
 ```
 
 Add `--wait` when the current task needs the job's result before continuing.
-Otherwise the command returns as soon as the job is queued. Different jobs can
-run in parallel; a scheduled occurrence of an already busy job is skipped.
+It is supported inside agent runs and hooks. Without it, the command returns as
+soon as the job is queued; the service owns that job and it can continue after
+the calling turn ends. A job already queued or running skips scheduled
+occurrences without catch-up and rejects additional manual triggers.
 
 Jobs live at `$ENSO_HOME/jobs/JOB/`. A required `prompt.md` is the user request;
 `job.json` sets `cron`, `enabled`, optional `execution` overrides and `notify`.
