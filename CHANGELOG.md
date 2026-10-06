@@ -9,6 +9,9 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 - Enso connects to Slack Socket Mode. In 0.1.0, every build panicked while
   opening the connection, so a running service never received messages.
+- Linux services start. systemd rejected the quoted `WorkingDirectory` in units
+  written by 0.1.0. After upgrading on Linux, run `enso service install`, then
+  `enso service restart`.
 
 ## [0.1.0] - 2026-10-06
 

@@ -312,6 +312,15 @@ fn systemd_quote(value: &str) -> Result<String> {
     ))
 }
 
+/// Path settings such as `WorkingDirectory=` take the value literally: systemd
+/// does not remove quotes there, and it trims surrounding whitespace.
+fn systemd_path(value: &str) -> Result<String> {
+    if value.chars().any(|c| c.is_control()) || value.trim() != value {
+        bail!("service paths cannot contain control characters or surrounding whitespace");
+    }
+    Ok(value.replace('%', "%%"))
+}
+
 fn render_systemd(
     service: &Service,
     executable: &Path,
@@ -330,7 +339,7 @@ fn render_systemd(
     // systemd expands $variables in ExecStart even inside quoted arguments.
     let executable = systemd_quote(&executable.to_string_lossy())?.replace('$', "$$");
     let home_arg = systemd_quote(&service.home.to_string_lossy())?.replace('$', "$$");
-    let home = systemd_quote(&service.home.to_string_lossy())?;
+    let home = systemd_path(&service.home.to_string_lossy())?;
     Ok(format!(
         "[Unit]\nDescription=Enso Slack assistant\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={executable} --home {home_arg} run\nWorkingDirectory={home}\n{env}Restart=on-failure\nRestartSec=5\nTimeoutStopSec=30\nKillMode=mixed\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
     ))
@@ -355,7 +364,9 @@ mod tests {
         assert!(
             systemd.contains("ExecStart=\"/tmp/bin$$enso\" --home \"/tmp/a & b/$$home%%\" run")
         );
+        assert!(systemd.contains("\nWorkingDirectory=/tmp/a & b/$home%%\n"));
         assert!(systemd.contains("Environment=\"PATH=/bin:/path with space\""));
+        assert!(systemd_path("/tmp/trailing ").is_err());
         assert!(xml("bad\nvalue").is_err());
     }
 }
