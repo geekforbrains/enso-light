@@ -1,0 +1,26 @@
+# Enso
+
+A small Rust service that connects Slack to an installed Claude Code or Codex CLI,
+plus scheduled jobs using the same runner. One binary, one shared workspace, and
+one SQLite database. Native CLIs keep their own authentication and sessions.
+
+```sh
+cargo install --path .
+enso init
+# Set ~/.enso/.env credentials and permitted Slack users in config.json.
+enso config check
+enso service install
+enso service start
+```
+
+Start with one permitted DM user. Enso accepts no conversations until you configure
+the allowlist. DMs share one session; channel threads get separate sessions.
+Slack controls: `!clear`, `!stop`, `!status`, and `!help`.
+
+- [Configuration and Slack setup](docs/configuration.md)
+- [Jobs and hooks](docs/jobs.md)
+- [CLI and installation](docs/cli.md)
+- [Runtime and development](docs/runtime.md)
+
+Requires Rust for building, an authenticated agent CLI, Bash for job hooks, and
+macOS or Linux. Service installation uses your user's launchd or systemd manager.

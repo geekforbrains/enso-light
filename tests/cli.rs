@@ -1,0 +1,162 @@
+//! Black-box CLI checks use isolated homes and fake credentials only.
+use enso::{app, db::Db};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Output},
+};
+
+fn enso(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_enso"))
+        .arg("--home")
+        .arg(home)
+        .arg("--json")
+        .args(args)
+        .env_remove("ENSO_HOME")
+        .env_remove("ENSO_RUN_ID")
+        .env_remove("ENSO_CHANNEL")
+        .env_remove("ENSO_THREAD_TS")
+        .output()
+        .unwrap()
+}
+
+fn successful(output: Output) -> Value {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn configured_home() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    successful(enso(directory.path(), &["init"]));
+    fs::write(
+        directory.path().join(".env"),
+        "SLACK_BOT_TOKEN=fake-bot-token\nSLACK_APP_TOKEN=fake-app-token\n",
+    )
+    .unwrap();
+    directory
+}
+
+fn add_job(home: &Path, name: &str, definition: Value) {
+    let job = home.join("jobs").join(name);
+    fs::create_dir_all(&job).unwrap();
+    fs::write(job.join("job.json"), definition.to_string()).unwrap();
+    fs::write(job.join("prompt.md"), "This is a fake test job.").unwrap();
+}
+
+#[test]
+fn init_creates_guidance_and_database_without_overwriting_local_content() {
+    let directory = configured_home();
+    let home = directory.path();
+    for name in [
+        "enso.db",
+        "config.json",
+        ".env",
+        "workspace/AGENTS.md",
+        "workspace/.skills/enso/SKILL.md",
+    ] {
+        assert!(home.join(name).is_file(), "missing {name}");
+    }
+    for name in ["jobs", "logs", "workspace/uploads"] {
+        assert!(home.join(name).is_dir(), "missing {name}");
+    }
+    assert_eq!(
+        fs::read_link(home.join("workspace/CLAUDE.md")).unwrap(),
+        Path::new("AGENTS.md")
+    );
+    let custom_agents = "# Local identity\nKeep this exact text.\n";
+    let custom_skill = "# Local Enso skill\nKeep this exact skill.\n";
+    fs::write(home.join("workspace/AGENTS.md"), custom_agents).unwrap();
+    fs::write(home.join("workspace/.skills/enso/SKILL.md"), custom_skill).unwrap();
+    fs::write(home.join("workspace/personal.txt"), "Keep personal files.").unwrap();
+    let original_config = fs::read(home.join("config.json")).unwrap();
+    let original_env = fs::read(home.join(".env")).unwrap();
+    successful(enso(home, &["init"]));
+    assert_eq!(fs::read(home.join("config.json")).unwrap(), original_config);
+    assert_eq!(fs::read(home.join(".env")).unwrap(), original_env);
+    assert_eq!(
+        fs::read_to_string(home.join("workspace/AGENTS.md")).unwrap(),
+        custom_agents
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("workspace/.skills/enso/SKILL.md")).unwrap(),
+        custom_skill
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("workspace/personal.txt")).unwrap(),
+        "Keep personal files."
+    );
+}
+
+#[test]
+fn config_check_validates_jobs_locally_without_exposing_credentials() {
+    let directory = configured_home();
+    add_job(directory.path(), "report", json!({"cron":"0 9 * * *"}));
+    let valid = successful(enso(directory.path(), &["config", "check"]));
+    assert_eq!(valid["valid"], true);
+    assert_eq!(valid["jobs"], 1);
+    assert!(!valid.to_string().contains("fake-bot-token"));
+    fs::remove_file(directory.path().join("jobs/report/prompt.md")).unwrap();
+    let output = enso(directory.path(), &["config", "check"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("prompt.md"));
+    assert!(!error.contains("fake-bot-token"));
+    assert!(!error.contains("fake-app-token"));
+}
+
+#[test]
+fn jobs_list_reports_definitions_and_trigger_requires_a_running_service() {
+    let directory = configured_home();
+    add_job(directory.path(), "report", json!({"cron":"0 9 * * *"}));
+    add_job(directory.path(), "manual", json!({"enabled":false}));
+    let list = successful(enso(directory.path(), &["jobs", "list"]));
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert_eq!(list[0]["name"], "manual");
+    assert_eq!(list[0]["enabled"], false);
+    assert_eq!(list[0]["next_run"], Value::Null);
+    assert_eq!(list[1]["name"], "report");
+    assert!(list[1]["next_run"].is_string());
+    let stopped = enso(directory.path(), &["jobs", "run", "report"]);
+    assert!(!stopped.status.success());
+    assert!(String::from_utf8_lossy(&stopped.stderr).contains("not running"));
+    assert!(
+        Db::open(directory.path())
+            .unwrap()
+            .claim()
+            .unwrap()
+            .is_none()
+    );
+    // Holding the daemon lock simulates liveness without launching any network
+    // service. The command must only enqueue, never execute a native CLI itself.
+    let _lock = app::lock(directory.path()).unwrap();
+    let receipt = successful(enso(directory.path(), &["jobs", "run", "manual"]));
+    assert_eq!(receipt["state"], "queued");
+    let db = Db::open(directory.path()).unwrap();
+    let work = db.claim().unwrap().unwrap();
+    assert_eq!(work.id, receipt["run_id"]);
+    assert_eq!(work.job.as_deref(), Some("manual"));
+    assert_eq!(work.trigger, "manual");
+    let overlap = enso(directory.path(), &["jobs", "run", "manual"]);
+    assert!(!overlap.status.success());
+    assert!(String::from_utf8_lossy(&overlap.stderr).contains("already queued or running"));
+}
+
+#[test]
+fn invalid_existing_configuration_is_not_reseeded_by_init() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.json");
+    fs::write(&config_path, "old incompatible config").unwrap();
+    let result = enso(directory.path(), &["init"]);
+    assert!(!result.status.success());
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        "old incompatible config"
+    );
+    assert!(!directory.path().join("workspace").exists());
+    assert!(!directory.path().join("enso.db").exists());
+}
