@@ -4,7 +4,7 @@ use enso::{
     app,
     config::{self, Destination},
     db::Db,
-    jobs, service,
+    formatting, jobs, service,
     slack::Slack,
     slack_cli,
 };
@@ -86,6 +86,9 @@ enum MessageCommand {
         thread: Option<String>,
         #[arg(long)]
         plain: bool,
+        /// Send a JSON array of Block Kit blocks as given; the text is its notification fallback.
+        #[arg(long, conflicts_with = "plain")]
+        blocks: Option<PathBuf>,
     },
 }
 #[derive(Subcommand)]
@@ -230,6 +233,7 @@ async fn execute(cli: Cli) -> Result<()> {
                     to,
                     thread,
                     plain,
+                    blocks,
                 },
         } => {
             active(&home)?;
@@ -279,7 +283,15 @@ async fn execute(cli: Cli) -> Result<()> {
             let run = std::env::var("ENSO_RUN_ID")
                 .ok()
                 .filter(|s| !s.is_empty() && db.run(s).is_ok());
-            let ids = db.outgoing(&destination, &body, plain, &files, run.as_deref(), true)?;
+            let payloads = match blocks {
+                Some(path) => vec![formatting::blocks(
+                    &body,
+                    &std::fs::read_to_string(path).context("Cannot read blocks file")?,
+                )?],
+                None if body.trim().is_empty() => Vec::new(),
+                None => formatting::messages(&body, plain)?,
+            };
+            let ids = db.outgoing(&destination, payloads, &files, run.as_deref(), true)?;
             let deadline = Instant::now() + Duration::from_secs(120);
             loop {
                 let receipts = ids

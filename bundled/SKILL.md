@@ -47,11 +47,18 @@ do not assume the bot's existing credentials support workspace search.
 enso message send "An update"
 enso message send --text-file report.md --file chart.png
 enso message send "Report ready" --to C012345 --thread 1234567890.123456
+enso message send "Weekly metrics: signups up 12%" --blocks metrics.json
 ```
 
 Use `--file PATH` repeatedly to attach files; `--text-file PATH` or stdin supplies
-message text. Without `--to`, Enso uses this run's reply or job notification target.
-Use an explicit destination for another conversation. The service must be running.
+message text. Text is standard Markdown; Slack renders it, including tables.
+When Markdown cannot express what you need, such as a native table, chart, or
+layout, write Block Kit JSON (https://docs.slack.dev/reference/block-kit/blocks)
+and send it with `--blocks PATH`; the text becomes its notification fallback.
+Blocks are sent as given, so mention syntax in them notifies people, and
+interactive callbacks such as button clicks are not handled. Without `--to`,
+Enso uses this run's reply or job notification target. Use an explicit
+destination for another conversation. The service must be running.
 Only send additional/background messages when the user's request calls for them.
 
 ## Jobs

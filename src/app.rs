@@ -3,7 +3,7 @@ use crate::{
     config::{self, Config},
     context,
     db::{Db, Run},
-    jobs, runner,
+    formatting, jobs, runner,
     slack::{Incoming, Slack},
 };
 use anyhow::{Context, Result, ensure};
@@ -97,8 +97,10 @@ pub async fn run(home: PathBuf) -> Result<()> {
                 .await;
             db.outgoing(
                 &input.reply,
-                "Enso restarted before this request completed. Please send it again.",
-                true,
+                formatting::messages(
+                    "Enso restarted before this request completed. Please send it again.",
+                    true,
+                )?,
                 &[],
                 None,
                 false,
@@ -264,7 +266,13 @@ fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Va
         None
     };
     if let Some(response) = response.filter(|s| !s.is_empty()) {
-        db.outgoing(&input.reply, &response, true, &[], None, false)?;
+        db.outgoing(
+            &input.reply,
+            formatting::messages(&response, true)?,
+            &[],
+            None,
+            false,
+        )?;
     }
     Ok(())
 }
@@ -357,17 +365,11 @@ async fn execute(
                 error.as_deref().unwrap_or("unknown error")
             ),
         };
-        if let Err(error) = db.outgoing(
-            &input.reply,
-            &response,
-            state != "succeeded",
-            &[],
-            Some(&work.id),
-            false,
-        ) {
+        let payloads = formatting::messages(&response, state != "succeeded").or_else(|error| {
             eprintln!("Reply formatting {}: {error}", work.id);
-            db.outgoing(&input.reply,"The run finished, but its reply could not be formatted. Inspect the service logs with enso service logs.",true,&[],Some(&work.id),false)?;
-        }
+            formatting::messages("The run finished, but its reply could not be formatted. Inspect the service logs with enso service logs.", true)
+        })?;
+        db.outgoing(&input.reply, payloads, &[], Some(&work.id), false)?;
     } else if let Some(error) = error {
         eprintln!("Job {}: {error}", work.job.as_deref().unwrap_or("unknown"));
     }

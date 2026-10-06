@@ -134,7 +134,13 @@ impl Fixture {
     fn background(&self, destination: &Destination, text: &str) -> String {
         let id = self
             .db
-            .outgoing(destination, text, true, &[], None, true)
+            .outgoing(
+                destination,
+                formatting::messages(text, true).unwrap(),
+                &[],
+                None,
+                true,
+            )
             .unwrap()
             .remove(0);
         self.db

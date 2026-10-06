@@ -1,5 +1,5 @@
 //! SQLite is the shared runtime state and local command queue.
-use crate::{config::Destination, formatting, slack::Incoming};
+use crate::{config::Destination, slack::Incoming};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -314,17 +314,11 @@ impl Db {
     pub fn outgoing(
         &self,
         destination: &Destination,
-        text: &str,
-        plain: bool,
+        payloads: Vec<Value>,
         files: &[PathBuf],
         run: Option<&str>,
         background: bool,
     ) -> Result<Vec<String>> {
-        let payloads = if text.is_empty() {
-            Vec::new()
-        } else {
-            formatting::messages(text, plain)?
-        };
         for file in files {
             ensure!(
                 file.is_file(),
@@ -338,7 +332,7 @@ impl Db {
         for mut payload in payloads {
             let id = id();
             payload["client_msg_id"] = json!(id);
-            let body = payload.get("text").and_then(Value::as_str).unwrap_or(text);
+            let body = payload["text"].as_str().unwrap_or_default();
             tx.execute("INSERT INTO messages(id,direction,run_id,channel,thread,body,payload,state,background,created_at) VALUES(?1,'out',?2,?3,?4,?5,?6,'pending',?7,?8)",params![id,run,destination.channel,destination.thread.as_deref().unwrap_or(""),body,payload.to_string(),background,now()])?;
             ids.push(id);
         }

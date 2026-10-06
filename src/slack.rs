@@ -12,10 +12,7 @@ use serde_json::{Value, json};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
-use crate::{
-    config::{Destination, SlackConfig},
-    formatting,
-};
+use crate::config::{Destination, SlackConfig};
 
 const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_FILES: usize = 20;
@@ -335,19 +332,6 @@ impl Slack {
             },
             files,
         }))
-    }
-
-    pub async fn send_text(
-        &self,
-        destination: &Destination,
-        text: &str,
-        plain: bool,
-    ) -> Result<Vec<String>> {
-        let mut timestamps = Vec::new();
-        for message in formatting::messages(text, plain)? {
-            timestamps.push(self.send_payload(destination, &message).await?);
-        }
-        Ok(timestamps)
     }
 
     /// Payloads can carry a persisted UUID client_msg_id supplied by the outbox.

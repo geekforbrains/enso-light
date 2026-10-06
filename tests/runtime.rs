@@ -3,6 +3,7 @@ use enso::{
     config::{Destination, Mentions, SlackConfig},
     context,
     db::Db,
+    formatting,
     slack::{Incoming, Slack},
 };
 use serde_json::{Value, json};
@@ -41,9 +42,13 @@ fn target(channel: &str, thread: Option<&str>) -> Destination {
     }
 }
 
+fn plain(text: &str) -> Vec<Value> {
+    formatting::messages(text, true).unwrap()
+}
+
 fn sent(db: &Db, destination: &Destination, text: &str, background: bool) -> String {
     let ids = db
-        .outgoing(destination, text, true, &[], None, background)
+        .outgoing(destination, plain(text), &[], None, background)
         .unwrap();
     assert_eq!(ids.len(), 1);
     let delivery = db.claim_delivery().unwrap().unwrap();
@@ -225,7 +230,13 @@ fn outbox_splits_once_and_persists_stable_ids_and_confirmed_receipts() {
     let destination = target("D1", Some("99.001"));
     let text = "**A long reply**\n\n".repeat(1500);
     let ids = db
-        .outgoing(&destination, &text, false, &[], None, true)
+        .outgoing(
+            &destination,
+            formatting::messages(&text, false).unwrap(),
+            &[],
+            None,
+            true,
+        )
         .unwrap();
     assert!(ids.len() > 1);
     for (index, expected) in ids.iter().enumerate() {
@@ -250,8 +261,14 @@ fn bad_attachment_prevents_partial_admission_and_valid_file_is_snapshotted() {
     let (directory, db) = database();
     let missing = directory.path().join("missing.txt");
     assert!(
-        db.outgoing(&target("D1", None), "caption", true, &[missing], None, true)
-            .is_err()
+        db.outgoing(
+            &target("D1", None),
+            plain("caption"),
+            &[missing],
+            None,
+            true
+        )
+        .is_err()
     );
     assert!(db.claim_delivery().unwrap().is_none());
     let path = directory.path().join("report.txt");
@@ -259,8 +276,7 @@ fn bad_attachment_prevents_partial_admission_and_valid_file_is_snapshotted() {
     let ids = db
         .outgoing(
             &target("D1", None),
-            "",
-            false,
+            Vec::new(),
             std::slice::from_ref(&path),
             None,
             true,
@@ -290,8 +306,7 @@ fn background_from_any_dm_thread_is_context_only_after_confirmed_send() {
     let pending = db
         .outgoing(
             &target("D1", None),
-            "Unconfirmed update",
-            true,
+            plain("Unconfirmed update"),
             &[],
             None,
             true,
@@ -371,8 +386,7 @@ fn chat_sent_messages_are_consumed_only_in_the_source_conversation() {
     let own = db
         .outgoing(
             &target("D1", None),
-            "Progress for you",
-            true,
+            plain("Progress for you"),
             &[],
             Some(&running.id),
             true,
@@ -382,8 +396,7 @@ fn chat_sent_messages_are_consumed_only_in_the_source_conversation() {
     let other = db
         .outgoing(
             &target("D2", None),
-            "A report from another conversation",
-            true,
+            plain("A report from another conversation"),
             &[],
             Some(&running.id),
             true,
@@ -488,15 +501,14 @@ fn recovery_interrupts_work_retains_sessions_and_never_replays_uncertain_sends()
         .unwrap();
     let job = db.enqueue_job("report", "manual", None).unwrap().unwrap();
     let unsent = db
-        .outgoing(&target("D1", None), "maybe sent", true, &[], None, true)
+        .outgoing(&target("D1", None), plain("maybe sent"), &[], None, true)
         .unwrap()[0]
         .clone();
     assert_eq!(db.claim_delivery().unwrap().unwrap().id, unsent);
     let pending = db
         .outgoing(
             &target("D1", None),
-            "definitely unsent",
-            true,
+            plain("definitely unsent"),
             &[],
             None,
             true,
@@ -535,7 +547,7 @@ fn file_receipt_keeps_file_identity_and_routes_background_by_actual_share_messag
     let path = directory.path().join("report.txt");
     std::fs::write(&path, "A scheduled report").unwrap();
     let id = db
-        .outgoing(&target("C1", None), "", false, &[path], None, true)
+        .outgoing(&target("C1", None), Vec::new(), &[path], None, true)
         .unwrap()[0]
         .clone();
     assert_eq!(db.claim_delivery().unwrap().unwrap().id, id);

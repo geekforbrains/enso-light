@@ -6,7 +6,7 @@ enso [--home PATH] run
 enso config check
 enso jobs list
 enso jobs run NAME [--wait]
-enso message send [TEXT|-] [--text-file PATH] [--file PATH] [--to CHANNEL] [--thread TS] [--plain] [--json]
+enso message send [TEXT|-] [--text-file PATH] [--file PATH] [--to CHANNEL] [--thread TS] [--plain|--blocks PATH] [--json]
 enso slack channels|channel|users|user|history|thread|message|search|link|react ...
 enso service install|start|stop|restart|uninstall|status
 enso service logs [--follow]
@@ -42,6 +42,7 @@ the service and removes registration; it preserves the entire Enso home.
 enso message send "Report ready" --to D012345
 enso message send --text-file report.md --file chart.png --to C012345
 printf '%s' 'A threaded update' | enso message send - --to C012345 --thread 1234567890.123456
+enso message send "Weekly metrics" --blocks metrics.json --to C012345
 ```
 
 Use repeatable `--file` for outgoing attachments. `--text-file` supplies message
@@ -50,12 +51,22 @@ Receipts include delivery state and a Slack reference: a message timestamp for
 text, or a remote file ID for attachments. File receipts also include
 `message_ts` when Slack has exposed the associated message; successful upload
 does not depend on that optional timestamp being available immediately.
-Use `--plain` to disable Markdown-to-Slack formatting for message text.
 An explicit destination wins; otherwise the current chat's reply destination,
 job notification destination, or configured Slack notification destination is
-used. A missing destination is an error. Enso formats Markdown for Slack and
-splits long replies. Confirmed background sends become context for the next
-conversation turn.
+used. A missing destination is an error. Confirmed background sends become
+context for the next conversation turn.
+
+Message text and replies are standard Markdown, which Slack renders in
+`markdown` blocks, including tables and task lists. Enso escapes `&` and `<`
+outside code so Slack syntax such as `<@U…>` or `<!channel>` stays literal. It
+splits text over Slack's 12,000-character message limit between Markdown
+blocks; an oversized code block or table repeats its opening fence or header in
+each part. `--plain` sends text without Markdown rendering. `--blocks PATH`
+sends a JSON array of Block Kit blocks, or a Block Kit Builder
+`{"blocks": [...]}` payload, as given for native tables, charts, or layouts
+Markdown cannot express. The message text is required as its notification
+fallback. Blocks are not escaped, and Enso does not handle interactive callbacks
+such as button clicks.
 
 Incoming attachments are downloaded into `workspace/uploads/<run-id>/` with safe
 filenames. The current prompt includes their paths. An incoming message supports
