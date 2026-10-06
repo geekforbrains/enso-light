@@ -63,8 +63,8 @@ splits text over Slack's 12,000-character message limit between Markdown
 blocks; an oversized code block or table repeats its opening fence or header in
 each part. `--plain` sends text without Markdown rendering. `--blocks PATH`
 sends a JSON array of Block Kit blocks, or a Block Kit Builder
-`{"blocks": [...]}` payload, as given for native tables, charts, or layouts
-Markdown cannot express. The message text is required as its notification
+`{"blocks": [...]}` payload, as given for native charts (`data_visualization`),
+sortable tables (`data_table`), or layouts Markdown cannot express. The message text is required as its notification
 fallback. Blocks are not escaped, and Enso does not handle interactive callbacks
 such as button clicks.
 

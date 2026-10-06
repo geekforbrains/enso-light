@@ -52,13 +52,31 @@ enso message send "Weekly metrics: signups up 12%" --blocks metrics.json
 
 Use `--file PATH` repeatedly to attach files; `--text-file PATH` or stdin supplies
 message text. Text is standard Markdown; Slack renders it, including tables.
-When Markdown cannot express what you need, such as a native table, chart, or
-layout, write Block Kit JSON (https://docs.slack.dev/reference/block-kit/blocks)
-and send it with `--blocks PATH`; the text becomes its notification fallback.
-Blocks are sent as given, so mention syntax in them notifies people, and
-interactive callbacks such as button clicks are not handled. Without `--to`,
-Enso uses this run's reply or job notification target. Use an explicit
-destination for another conversation. The service must be running.
+
+When Markdown cannot express what you need, write Block Kit JSON
+(https://docs.slack.dev/reference/block-kit/blocks) and send it with
+`--blocks PATH`; the text becomes its notification fallback. Slack draws native
+charts with a `data_visualization` block (line, bar, area, or pie; at most two
+per message) and sortable, paginated tables with a `data_table` block (up to
+200 rows; use `raw_number` cells for numeric sorting). Read the block's
+reference page before writing one. A bar chart:
+
+```json
+[{"type": "data_visualization", "title": "Signups by month",
+  "chart": {"type": "bar",
+    "series": [{"name": "Signups", "data": [
+      {"label": "Sep", "value": 1350}, {"label": "Oct", "value": 1520}]}],
+    "axis_config": {"categories": ["Sep", "Oct"], "y_label": "Accounts"}}}]
+```
+
+Every series needs one point per category; titles are at most 50 characters
+and labels at most 20. A pie chart uses
+`"segments": [{"label": "Twix", "value": 28}]` instead of `series` and
+`axis_config`. Blocks are sent as given, so mention syntax in them notifies
+people, and interactive callbacks such as button clicks are not handled.
+
+Without `--to`, Enso uses this run's reply or job notification target. Use an
+explicit destination for another conversation. The service must be running.
 Only send additional/background messages when the user's request calls for them.
 
 ## Jobs
