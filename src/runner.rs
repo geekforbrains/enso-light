@@ -508,7 +508,8 @@ mod tests {
             "codex",
             "sleep 30 &\necho $! > child-pid\nwait",
         );
-        req.settings.timeout_seconds = 1;
+        // Allow the shell to start under parallel CI load before testing timeout cleanup.
+        req.settings.timeout_seconds = 3;
         let error = execute(req, CancellationToken::new())
             .await
             .unwrap_err()

@@ -6,7 +6,7 @@ use enso::{
     db::Db,
     formatting, jobs, service,
     slack::Slack,
-    slack_cli,
+    slack_cli, upgrade,
 };
 use serde_json::{Value, json};
 use std::{
@@ -34,6 +34,8 @@ enum Command {
     Init,
     /// Run the foreground service.
     Run,
+    /// Install the latest release and immediately restart the installed service.
+    Upgrade,
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -156,6 +158,10 @@ async fn execute(cli: Cli) -> Result<()> {
             );
         }
         Command::Run => app::run(home).await?,
+        Command::Upgrade => {
+            let result = tokio::task::spawn_blocking(move || upgrade::run(&home)).await??;
+            print(&result, cli.json);
+        }
         Command::Slack { command } => {
             let loaded = config::load(&home)?;
             let slack = Slack::new(&loaded.config.slack)?;

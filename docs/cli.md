@@ -3,6 +3,7 @@
 ```text
 enso [--home PATH] init
 enso [--home PATH] run
+enso [--home PATH] upgrade
 enso config check
 enso jobs list
 enso jobs run NAME [--wait]
@@ -16,10 +17,10 @@ enso service logs [--follow]
 foreground service. A lock allows only one service per Enso home. Job triggers
 and message sends need a running service; they submit work to SQLite.
 
-Install an authenticated Claude Code or Codex CLI first, then build Enso:
+Install an authenticated Claude Code or Codex CLI first, then install Enso:
 
 ```sh
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/geekforbrains/enso-light/releases/latest/download/enso-installer.sh | sh
 enso init
 nvim ~/.enso/config.json ~/.enso/.env
 enso config check
@@ -27,6 +28,25 @@ enso service install
 enso service start
 enso service status
 ```
+
+The installer uses `~/.local/bin`; follow its PATH instructions if needed.
+Prebuilt binaries support macOS and Linux on ARM64 and x86-64. Source builds
+require Rust: `cargo install --locked --path .` from this repository.
+
+Run `enso upgrade` from a terminal to download and verify the latest release,
+replace the executable at its existing path, and immediately restart this home's
+installed service. Active work is interrupted. It starts an installed service
+even if stopped; without an installed service it only updates the binary.
+An already current version does not restart. Config, credentials, jobs, workspace
+files, and database are preserved.
+
+Upgrades require a writable install directory and cannot run from an Enso agent
+or hook, since restarting stops those processes. Stop a foreground `enso run`
+first. A service registered to another executable requires upgrading through
+that executable or explicitly reinstalling its registration. Other homes using
+the same binary need their own restart. If restart verification fails, the error
+reports that the new binary is installed; inspect `enso service status` and
+`enso service logs`. Read the [changelog](../CHANGELOG.md) for compatibility notes.
 
 Service installation uses launchd on macOS and systemd user services on Linux.
 It enables startup at login; `start` runs it now. Linux operation after logout

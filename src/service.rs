@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -40,6 +40,35 @@ fn service(home: &Path) -> Result<Service> {
         bail!("service management supports macOS launchd and Linux systemd");
     };
     Ok(Service { name, file, home })
+}
+
+/// An upgrade must replace the executable registered with this home's service.
+/// An uninitialized home or an installation without a service is also supported.
+pub fn upgrade_installed(home: &Path, executable: &Path) -> Result<bool> {
+    if !home.exists() {
+        return Ok(false);
+    }
+    let service = service(home)?;
+    if !service.file.exists() {
+        return Ok(false);
+    }
+    let definition = fs::read_to_string(&service.file)?;
+    let expected = if cfg!(target_os = "macos") {
+        format!(
+            "<key>ProgramArguments</key><array><string>{}</string>",
+            xml(&executable.to_string_lossy())?
+        )
+    } else {
+        format!(
+            "ExecStart={} --home ",
+            systemd_quote(&executable.to_string_lossy())?.replace('$', "$$")
+        )
+    };
+    ensure!(
+        definition.contains(&expected),
+        "The service uses a different Enso executable. Run upgrade using that executable, or reinstall the service with enso service install."
+    );
+    Ok(true)
 }
 
 pub fn install(home: &Path) -> Result<Value> {

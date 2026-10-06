@@ -1,0 +1,34 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      plan:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Check
+        run: |
+          cargo +stable fmt --check
+          cargo +stable clippy --locked --all-targets -- -D warnings
+          cargo +stable test --locked
+          python3 scripts/check-release.py

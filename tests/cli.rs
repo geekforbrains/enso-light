@@ -42,6 +42,56 @@ fn configured_home() -> tempfile::TempDir {
     directory
 }
 
+#[test]
+fn upgrades_from_enso_runs_are_rejected_before_network_or_home_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("uninitialized");
+    let output = Command::new(env!("CARGO_BIN_EXE_enso"))
+        .args(["--home", home.to_str().unwrap(), "--json", "upgrade"])
+        .env("ENSO_RUN_ID", "test-run")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(error["error"].as_str().unwrap().contains("outside Enso"));
+    assert!(!home.exists());
+}
+
+#[test]
+fn upgrade_rejects_a_service_registered_to_another_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = configured_home();
+    let account = tempfile::tempdir().unwrap();
+    let bin = account.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let systemctl = bin.join("systemctl");
+    fs::write(&systemctl, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_enso"))
+            .arg("--home")
+            .arg(directory.path())
+            .arg("--json")
+            .args(args)
+            .env("HOME", account.path())
+            .env("XDG_CONFIG_HOME", account.path().join("config"))
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env_remove("ENSO_RUN_ID")
+            .output()
+            .unwrap()
+    };
+    let installed = successful(run(&["service", "install"]));
+    let file = Path::new(installed["file"].as_str().unwrap());
+    fs::write(file, "a service registered to another executable").unwrap();
+    let output = run(&["upgrade"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("different Enso executable"));
+    assert_eq!(
+        fs::read_to_string(file).unwrap(),
+        "a service registered to another executable"
+    );
+}
+
 fn add_job(home: &Path, name: &str, definition: Value) {
     let job = home.join("jobs").join(name);
     fs::create_dir_all(&job).unwrap();

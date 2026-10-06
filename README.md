@@ -5,7 +5,7 @@ plus scheduled jobs using the same runner. One binary, one shared workspace, and
 one SQLite database. Native CLIs keep their own authentication and sessions.
 
 ```sh
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/geekforbrains/enso-light/releases/latest/download/enso-installer.sh | sh
 enso init
 # Set ~/.enso/.env credentials and permitted Slack users in config.json.
 enso config check
@@ -28,6 +28,16 @@ directly; outgoing messages use `enso message send` for tracked delivery.
 - [Jobs and hooks](docs/jobs.md)
 - [CLI and installation](docs/cli.md)
 - [Runtime and development](docs/runtime.md)
+- [Changelog](CHANGELOG.md)
+- [Release flow](docs/releases.md)
 
-Requires Rust for building, an authenticated agent CLI, Bash for job hooks, and
-macOS or Linux. Service installation uses your user's launchd or systemd manager.
+Requires an authenticated agent CLI, Bash for job hooks, and macOS or Linux on
+ARM64 or x86-64. Service installation uses your user's launchd or systemd manager.
+The installer places Enso in `~/.local/bin`; follow its PATH instructions if needed.
+To build from source, install Rust and run `cargo install --locked --path .`.
+
+Run `enso upgrade` from a terminal to install the latest release and immediately
+restart the service. Active work is interrupted. Configuration and runtime state
+are preserved. See [installation and upgrades](docs/cli.md).
+
+Released under the [MIT license](LICENSE).

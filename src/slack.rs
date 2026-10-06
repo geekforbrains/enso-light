@@ -299,10 +299,8 @@ impl Slack {
             .flatten()
             .map(remote_file)
             .collect();
-        ensure!(
-            files.len() <= MAX_FILES,
-            "A Slack message may have at most {MAX_FILES} attachments"
-        );
+        // Admit and acknowledge the event before reporting attachment limits.
+        // download() rejects it as a failed run instead of reconnecting forever.
         if text.is_empty() && files.is_empty() {
             return Ok(None);
         }
@@ -777,6 +775,21 @@ mod tests {
             value["event"]["thread_ts"] = json!(thread);
         }
         value
+    }
+
+    #[tokio::test]
+    async fn too_many_attachments_are_admitted_then_fail_without_downloading() {
+        let slack = slack();
+        let mut payload = message("D1", "files", None);
+        payload["event"]["files"] = json!(vec![json!({"id":"F1","name":"file"}); MAX_FILES + 1]);
+        let incoming = slack.normalize(&payload, "UBOT", false).unwrap().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let error = slack
+            .download(&incoming.files, &temp.path().join("uploads"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("at most 20 attachments"));
+        assert!(!temp.path().join("uploads").exists());
     }
 
     #[test]
