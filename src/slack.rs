@@ -111,6 +111,9 @@ impl Slack {
             let address = format!("{}/{method}", self.base);
             let request = if read_method(method) || method == "search.messages" {
                 self.http.get(&address).query(body)
+            } else if method == "files.getUploadURLExternal" {
+                // Slack ignores JSON arguments for this method.
+                self.http.post(&address).form(body)
             } else {
                 self.http.post(&address).json(body)
             };
@@ -1075,6 +1078,24 @@ mod tests {
                 .is_none()
         );
         assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_url_request_is_form_encoded() {
+        let (slack, server) = fixture(vec![response(
+            json!({"ok":true,"upload_url":"https://files.slack.com/upload/v1/x","file_id":"F1"}),
+        )])
+        .await;
+        slack
+            .api(
+                "files.getUploadURLExternal",
+                &json!({"filename":"chart one.png","length":5}),
+            )
+            .await
+            .unwrap();
+        let request = server.await.unwrap().remove(0).to_ascii_lowercase();
+        assert!(request.contains("content-type: application/x-www-form-urlencoded"));
+        assert!(request.ends_with("\r\n\r\nfilename=chart+one.png&length=5"));
     }
 
     #[tokio::test]
