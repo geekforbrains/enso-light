@@ -29,8 +29,8 @@ enso slack react C012345 '1791295200.000100' eyes
 ```
 
 These return JSON directly from configured Slack access; no running service is
-needed. Use `channel ID` or `user ID` for details and `react ... --remove` to
-remove a reaction. Preserve timestamps as strings. Follow returned cursors for
+needed. Use `channel ID` or `user ID` for details; `react ... --remove` removes
+the bot's own reaction. Preserve timestamps as strings. Follow returned cursors for
 more channel, user, history, thread, or search results.
 
 `search --channel` filters one history page using a literal, case-insensitive

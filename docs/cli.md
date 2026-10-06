@@ -64,9 +64,9 @@ blocks; an oversized code block or table repeats its opening fence or header in
 each part. `--plain` sends text without Markdown rendering. `--blocks PATH`
 sends a JSON array of Block Kit blocks, or a Block Kit Builder
 `{"blocks": [...]}` payload, as given for native charts (`data_visualization`),
-sortable tables (`data_table`), or layouts Markdown cannot express. The message text is required as its notification
-fallback. Blocks are not escaped, and Enso does not handle interactive callbacks
-such as button clicks.
+sortable tables (`data_table`), or layouts Markdown cannot express. The message
+text is required as its notification fallback. Blocks are not escaped, and Enso
+does not handle interactive callbacks such as button clicks.
 
 Incoming attachments are downloaded into `workspace/uploads/<run-id>/` with safe
 filenames. The current prompt includes their paths. An incoming message supports
@@ -96,7 +96,8 @@ enso slack react CHANNEL TS EMOJI [--remove]
 
 Use IDs returned by channel/user lookup. Treat Slack timestamps as strings and
 preserve every digit. A message lookup can specify `--thread` when its timestamp
-belongs to a reply. Reactions use emoji names such as `thumbsup`, without colons.
+belongs to a reply. Reactions use emoji names such as `thumbsup`, without colons;
+`--remove` removes only the bot's own reaction.
 Follow returned cursors for additional pages; one page is not an entire channel
 or thread, and Slack may return fewer items than the requested limit. History
 and thread responses keep Slack's `has_more` and

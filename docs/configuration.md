@@ -98,13 +98,26 @@ Direct `enso slack` commands reload these files on each invocation.
 ## Slack app
 
 Use a Slack app with Socket Mode enabled and an app-level token with
-`connections:write`. Install its bot in the workspace with `chat:write`,
-`reactions:write`, `files:read`, `files:write`, `users:read`, `im:read`,
-`im:history`, `channels:read`, `channels:history`, `groups:read`, and
-`groups:history` as needed for the configured conversations. Subscribe to
-`message.im`, `app_mention`, `message.channels`, and `message.groups` events.
-Invite the bot to any configured channel. DM-only installations need only the
-corresponding DM capabilities, alongside chat, reactions, users, and files.
+`connections:write`. Install its bot with these scopes:
+
+| Scope | Used for |
+|---|---|
+| `chat:write` | Replies and `enso message send` |
+| `files:write` | Outgoing attachments |
+| `files:read` | Incoming attachments and upload receipts |
+| `reactions:write` | The working reaction and `enso slack react` |
+| `users:read` | Sender names and user lookup |
+| `im:read`, `im:history` | DMs |
+| `app_mentions:read` | Channel mentions |
+| `channels:read`, `channels:history` | Public channels |
+| `groups:read`, `groups:history` | Private channels |
+| `mpim:read`, `mpim:history` | Optional group DM lookups |
+
+Subscribe to the `message.im`, `app_mention`, `message.channels`, and
+`message.groups` bot events, and invite the bot to any configured channel. A
+DM-only installation can omit `app_mentions:read`, the `channels` and `groups`
+scopes, and their events. Enso does not use other scopes such as
+`chat:write.public`, `im:write`, or `users:read.email`.
 
 Only one service should consume the same Socket Mode app token. Enso preserves
 Slack event IDs to ignore duplicate deliveries. Use `enso service status` to
@@ -112,11 +125,10 @@ check both the service and Slack connection; process startup alone is not a
 successful Slack connection.
 
 The [Slack CLI commands](cli.md#slack-lookup-and-reactions) use the bot token for
-channel/user lookup, history, threads, links, and reactions. These operations
-need the matching read/history or `reactions:write` scopes and access to the
-conversation. Group DMs additionally use `mpim:read` and `mpim:history`.
-Incoming `dm_users` and `channels` settings control which messages start agent
-turns; they do not restrict direct Web API lookups or reactions.
+channel/user lookup, history, threads, links, and reactions, so they need the
+matching scopes above and access to the conversation. Incoming `dm_users` and
+`channels` settings control which messages start agent turns; they do not
+restrict direct Web API lookups or reactions.
 
 ## Workspace search
 
