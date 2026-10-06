@@ -220,6 +220,14 @@ impl Db {
         )?;
         Ok(())
     }
+    /// Keeps postrun retry history with the run's stored context.
+    pub fn record_attempts(&self, run: &str, attempts: &[Value]) -> Result<()> {
+        self.connect()?.execute(
+            "UPDATE runs SET context=json_set(coalesce(context,'{}'),'$.attempts',json(?2)) WHERE id=?1",
+            params![run, Value::from(attempts.to_vec()).to_string()],
+        )?;
+        Ok(())
+    }
     pub fn finish(
         &self,
         run: &str,
@@ -298,7 +306,7 @@ impl Db {
         )
     }
     pub fn run(&self, run: &str) -> Result<Value> {
-        self.connect()?.query_row("SELECT id,kind,job_name,state,created_at,started_at,finished_at,result,error FROM runs WHERE id=?1",[run],|r|Ok(json!({"id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"job":r.get::<_,Option<String>>(2)?,"state":r.get::<_,String>(3)?,"created_at":r.get::<_,i64>(4)?,"started_at":r.get::<_,Option<i64>>(5)?,"finished_at":r.get::<_,Option<i64>>(6)?,"result":r.get::<_,Option<String>>(7)?,"error":r.get::<_,Option<String>>(8)?}))).context("Unknown run")
+        self.connect()?.query_row("SELECT id,kind,job_name,state,created_at,started_at,finished_at,result,error,json_extract(context,'$.attempts') FROM runs WHERE id=?1",[run],|r|Ok(json!({"id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"job":r.get::<_,Option<String>>(2)?,"state":r.get::<_,String>(3)?,"created_at":r.get::<_,i64>(4)?,"started_at":r.get::<_,Option<i64>>(5)?,"finished_at":r.get::<_,Option<i64>>(6)?,"result":r.get::<_,Option<String>>(7)?,"error":r.get::<_,Option<String>>(8)?,"attempts":r.get::<_,Option<String>>(9)?.and_then(|a|serde_json::from_str::<Value>(&a).ok())}))).context("Unknown run")
     }
     pub fn last_job(&self, name: &str) -> Result<Value> {
         let id = self

@@ -519,8 +519,9 @@ async fn execute_inner(
         }
         request = jobs::interpolate(&job.prompt, &variables)?;
     }
-    let prompt = context::render(
-        if incoming.is_some() { "slack" } else { "job" },
+    let source = if incoming.is_some() { "slack" } else { "job" };
+    let mut prompt = context::render(
+        source,
         work.session.is_none(),
         &header,
         &background,
@@ -532,58 +533,102 @@ async fn execute_inner(
         &header,
         &serde_json::to_value(&settings)?,
     )?;
-    let outcome = runner::execute(
-        runner::Request {
-            workspace,
-            settings: settings.clone(),
-            prompt,
-            session_id: work.session.clone(),
-            env: env.clone(),
-            images,
-        },
-        cancel.clone(),
-    )
-    .await;
-    let (mut state, text, mut error, session) = match outcome {
-        Ok(result) => ("succeeded".to_owned(), result.text, None, result.session_id),
-        Err(error) => {
-            let error = redact(&format!("{error:#}"), base_env, config);
-            let state = if cancel.is_cancelled() || error.contains("cancelled") {
-                "cancelled"
-            } else if error.contains("timed_out") {
-                "timed_out"
-            } else {
-                "failed"
-            };
-            (state.into(), String::new(), Some(error), None)
-        }
-    };
-    if let Some(job) = &job
-        && job.postrun
-        && !cancel.is_cancelled()
-    {
-        let mut input = header;
+    let max_attempts = job.as_ref().map_or(0, |job| job.retries) + 1;
+    let mut session = work.session.clone();
+    let mut attempts = Vec::new();
+    let mut attempt = 1;
+    loop {
+        let outcome = runner::execute(
+            runner::Request {
+                workspace: workspace.clone(),
+                settings: settings.clone(),
+                prompt,
+                session_id: session,
+                env: env.clone(),
+                images: images.clone(),
+            },
+            cancel.clone(),
+        )
+        .await;
+        let (mut state, text, mut error, next_session) = match outcome {
+            Ok(result) => ("succeeded".to_owned(), result.text, None, result.session_id),
+            Err(error) => {
+                let error = redact(&format!("{error:#}"), base_env, config);
+                let state = if cancel.is_cancelled() || error.contains("cancelled") {
+                    "cancelled"
+                } else if error.contains("timed_out") {
+                    "timed_out"
+                } else {
+                    "failed"
+                };
+                (state.into(), String::new(), Some(error), None)
+            }
+        };
+        session = next_session;
+        let Some(job) = job
+            .as_ref()
+            .filter(|job| job.postrun && !cancel.is_cancelled())
+        else {
+            return Ok((state, text, error, session, settings.cli));
+        };
+        let mut input = header.clone();
         input["variables"] = json!(variables);
         input["result"] = json!(text);
         input["status"] = json!(state);
         input["error"] = json!(error);
-        if let Err(post_error) = runner::hook(
+        input["attempt"] = json!(attempt);
+        input["max_attempts"] = json!(max_attempts);
+        let retry = match runner::hook(
             &job.directory.join("postrun.sh"),
             &input,
             &env,
             settings.timeout_seconds,
-            cancel,
+            cancel.clone(),
         )
         .await
+        .and_then(|output| jobs::postrun_result(&output))
         {
-            state = "failed".into();
-            error = Some(format!(
-                "postrun: {}",
-                redact(&format!("{post_error:#}"), base_env, config)
-            ));
+            Ok(retry) => retry.map(|message| redact(&message, base_env, config)),
+            Err(post_error) => {
+                state = "failed".into();
+                error = Some(format!(
+                    "postrun: {}",
+                    redact(&format!("{post_error:#}"), base_env, config)
+                ));
+                None
+            }
+        };
+        if retry.is_some() || attempt > 1 {
+            attempts.push(json!({"attempt":attempt,"status":state,"error":error,"retry":retry}));
+            db.record_attempts(&work.id, &attempts)?;
         }
+        let Some(message) = retry else {
+            return Ok((state, text, error, session, settings.cli));
+        };
+        if attempt == max_attempts {
+            error = Some(format!(
+                "postrun requested a retry with no retries left (retries: {}): {message}",
+                max_attempts - 1
+            ));
+            return Ok(("failed".into(), text, error, session, settings.cli));
+        }
+        attempt += 1;
+        let note = format!(
+            "postrun.sh asked for a retry (attempt {attempt} of {max_attempts}):\n{message}"
+        );
+        prompt = if session.is_some() {
+            context::render(source, false, &header, &background, &note)?
+        } else {
+            // A failed attempt leaves no session to resume, so start over with the original request.
+            context::render(
+                source,
+                true,
+                &header,
+                &background,
+                &format!("{request}\n\n{note}"),
+            )?
+        };
     }
-    Ok((state, text, error, session, settings.cli))
 }
 
 #[cfg(test)]

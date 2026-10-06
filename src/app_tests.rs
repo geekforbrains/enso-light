@@ -193,6 +193,11 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     assert_eq!(post["status"], "succeeded");
     assert!(post["error"].is_null());
     assert_eq!(
+        (post["attempt"].clone(), post["max_attempts"].clone()),
+        (json!(1), json!(1))
+    );
+    assert!(outcome["attempts"].is_null());
+    assert_eq!(
         fs::read_to_string(directory.join("prerun-env.txt")).unwrap(),
         "available-from-dotenv\njob\nreport\n"
     );
@@ -251,6 +256,131 @@ async fn prerun_skip_does_not_invoke_provider_postrun_or_prompt_interpolation() 
     assert!(!fixture.home.path().join("provider-ran").exists());
     assert!(!directory.join("postrun-input.json").exists());
     assert!(fixture.db.claim_delivery().unwrap().is_none());
+}
+
+/// Saves each attempt's postrun input, agent prompt and agent arguments as `*-N`.
+const RECORDING_POSTRUN: &str = "set -eu\nn=$(($(cat attempts 2>/dev/null || echo 0) + 1))\necho \"$n\" > attempts\ncat > \"post-$n.json\"\ncp \"$ENSO_HOME/workspace/input-$ENSO_RUN_ID.txt\" \"input-$n.txt\"\ncp \"$ENSO_HOME/workspace/args-$ENSO_RUN_ID.txt\" \"args-$n.txt\"\n";
+
+fn retrying_job(fixture: &Fixture, name: &str, definition: &str, postrun: &str) -> (Run, PathBuf) {
+    let (run, directory) = fixture.job(
+        name,
+        "Use the data.",
+        "cat >/dev/null\necho ran >> prerun-count.txt\n",
+    );
+    fs::write(directory.join("job.json"), definition).unwrap();
+    fs::write(
+        directory.join("postrun.sh"),
+        format!("{RECORDING_POSTRUN}{postrun}"),
+    )
+    .unwrap();
+    (run, directory)
+}
+
+fn read(directory: &Path, name: &str) -> String {
+    fs::read_to_string(directory.join(name)).unwrap()
+}
+
+#[tokio::test]
+async fn postrun_retry_resumes_the_session_with_its_message_until_accepted() {
+    let fixture = Fixture::new(false);
+    let (run, directory) = retrying_job(
+        &fixture,
+        "retry",
+        r#"{"retries":2}"#,
+        "echo 'checking output' >&2\n[ \"$n\" = 1 ] && printf '%s\\n' '{\"retry\":true,\"message\":\"The chart is missing.\"}'\nexit 0\n",
+    );
+    fixture.run_job(&run).await;
+    let outcome = fixture.db.run(&run.id).unwrap();
+    assert_eq!(outcome["state"], "succeeded", "{outcome}");
+    assert_eq!(outcome["result"], "Provider finished");
+    assert_eq!(
+        outcome["attempts"],
+        json!([
+            {"attempt":1,"status":"succeeded","error":null,"retry":"The chart is missing."},
+            {"attempt":2,"status":"succeeded","error":null,"retry":null}
+        ])
+    );
+    assert_eq!(read(&directory, "attempts"), "2\n");
+    assert_eq!(read(&directory, "prerun-count.txt"), "ran\n");
+    let (first, second) = (
+        json_file(&directory.join("post-1.json")),
+        json_file(&directory.join("post-2.json")),
+    );
+    assert_eq!(
+        (first["attempt"].clone(), first["max_attempts"].clone()),
+        (json!(1), json!(3))
+    );
+    assert_eq!(second["attempt"], 2);
+    assert_eq!(second["run_id"], run.id);
+    let initial = read(&directory, "input-1.txt");
+    assert!(initial.ends_with("Current request:\nUse the data."));
+    assert_eq!(fixture.snapshot(&run).0, initial);
+    assert!(!read(&directory, "args-1.txt").contains("--resume"));
+    assert!(read(&directory, "args-2.txt").contains(&format!("--resume\n{SESSION}\n")));
+    let retry = read(&directory, "input-2.txt");
+    assert!(!retry.contains("running an unattended job"));
+    assert!(retry.ends_with(
+        "Current request:\npostrun.sh asked for a retry (attempt 2 of 3):\nThe chart is missing."
+    ));
+}
+
+#[tokio::test]
+async fn postrun_retries_after_agent_failure_start_fresh_and_are_limited() {
+    let fixture = Fixture::new(true);
+    let (run, directory) = retrying_job(
+        &fixture,
+        "limited",
+        r#"{"retries":1}"#,
+        "printf '%s\\n' '{\"retry\":true,\"message\":\"Try again.\"}'\n",
+    );
+    fixture.run_job(&run).await;
+    let outcome = fixture.db.run(&run.id).unwrap();
+    assert_eq!(outcome["state"], "failed");
+    assert_eq!(
+        outcome["error"],
+        "postrun requested a retry with no retries left (retries: 1): Try again."
+    );
+    assert_eq!(read(&directory, "attempts"), "2\n");
+    assert_eq!(outcome["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(outcome["attempts"][1]["status"], "failed");
+    assert!(!read(&directory, "args-2.txt").contains("--resume"));
+    let retry = read(&directory, "input-2.txt");
+    assert!(retry.contains("running an unattended job"));
+    assert!(retry.ends_with(
+        "Current request:\nUse the data.\n\npostrun.sh asked for a retry (attempt 2 of 2):\nTry again."
+    ));
+}
+
+#[tokio::test]
+async fn postrun_retry_without_retries_or_invalid_output_fails_the_run() {
+    let fixture = Fixture::new(false);
+    let (run, directory) = retrying_job(
+        &fixture,
+        "no-retries",
+        "{}",
+        "printf '%s\\n' '{\"retry\":true,\"message\":\"Again.\"}'\n",
+    );
+    fixture.run_job(&run).await;
+    let outcome = fixture.db.run(&run.id).unwrap();
+    assert_eq!(outcome["state"], "failed");
+    assert_eq!(
+        outcome["error"],
+        "postrun requested a retry with no retries left (retries: 0): Again."
+    );
+    assert_eq!(read(&directory, "attempts"), "1\n");
+    let (run, directory) = retrying_job(&fixture, "chatty", r#"{"retries":3}"#, "echo done\n");
+    fixture.run_job(&run).await;
+    let outcome = fixture.db.run(&run.id).unwrap();
+    assert_eq!(outcome["state"], "failed");
+    assert_eq!(outcome["result"], "Provider finished");
+    assert!(
+        outcome["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("postrun: postrun stdout must be empty")
+    );
+    assert_eq!(read(&directory, "attempts"), "1\n");
+    assert!(outcome["attempts"].is_null());
 }
 
 fn incoming(ts: &str, thread: Option<&str>, user: &str, name: &str, text: &str) -> Incoming {

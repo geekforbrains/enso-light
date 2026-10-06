@@ -103,9 +103,15 @@ Runs use the shared workspace and fresh native sessions. Optional `prerun.sh` an
 `postrun.sh` run with Bash from the job directory. Prerun stdout provides JSON;
 return `{"vars":{"NAME":"value"}}` to expand `{{NAME}}` in the prompt or
 `{"skip":true,"reason":"Nothing new"}` to skip. Diagnostics go to stderr.
-Postrun stdin contains run context plus `variables`, `result`, `status`, and
-`error`. Job output is saved, not sent to Slack automatically. Use
-`enso message send` when the job asks for a notification.
+Postrun runs after each agent attempt; stdin contains run context plus
+`variables`, `result`, `status`, `error`, `attempt`, and `max_attempts`. Its
+stdout is empty to accept, or `{"retry":true,"message":"What to fix"}` to resume
+the agent's session with that message right away. `retries` in `job.json`
+(default 0, at most 10) limits extra attempts; then the run fails. In either
+hook, redirect commands that print, such as `enso message send`, with `>&2`.
+Job output is saved, not sent to Slack automatically. Use `enso message send`
+when the job asks for a notification; a job that may retry should notify from
+postrun after accepting, since sent messages are not withdrawn.
 
 ## Configuration and status
 

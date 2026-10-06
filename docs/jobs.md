@@ -16,7 +16,8 @@ Names use letters, numbers, hyphens, and underscores. `prompt.md` must be nonemp
   "enabled": true,
   "cron": "0 9 * * 1-5",
   "execution": { "effort": "high", "timeout_seconds": 600 },
-  "notify": { "channel": "D012345" }
+  "notify": { "channel": "D012345" },
+  "retries": 2
 }
 ```
 
@@ -25,6 +26,9 @@ conversation ID (`C…` for a channel, `G…` for a private channel, `D…` for 
 Add `"thread": "1700000000.000001"` with a root message timestamp to post in that
 thread. Enso checks the format when it loads the job; the bot must be able to post
 there. Leave it out for a job that never posts.
+
+`retries` is how many extra attempts postrun may request in one run (default 0,
+at most 10). See [Postrun and retries](#postrun-and-retries).
 
 `cron` uses five fields (minute, hour, day of month, month, day of week) and the
 machine's timezone. Omit it for a manual-only job. `enabled` defaults to true and
@@ -81,11 +85,9 @@ skip instead:
 ```
 
 A skip runs neither the agent nor postrun. A failed prerun prevents the agent
-from running. Prerun receives the run's context JSON on stdin. Postrun receives
-the same object plus `variables` (prerun values), `result` (agent output),
-`status`, and `error` (null on success). It runs after agent completion,
-including failure, unless the run was cancelled. Timeouts and cancellation stop
-the running process group. Hook failure is visible in the job's outcome.
+and postrun from running. Prerun receives the run's context JSON on stdin and
+runs once per run. Timeouts and cancellation stop a hook's process group. Hook
+failure is visible in the job's outcome.
 
 Enso sets `ENSO_HOME`, `ENSO_RUN_ID`, `ENSO_SOURCE`, and `ENSO_JOB` for the agent
 and hooks. `ENSO_CHANNEL` and `ENSO_THREAD_TS` provide the Slack conversation or
@@ -97,3 +99,32 @@ environment or `.env`.
 Job turns get separate guidance and metadata identifying the job, trigger,
 scheduled time, workspace, and notification destination. They never inherit a
 Slack sender's identity or a chat session.
+
+### Postrun and retries
+
+Postrun receives the prerun context plus `variables` (prerun values), `result`
+(agent output), `status`, `error` (null on success), `attempt` (starting at 1),
+and `max_attempts`. It runs after every agent attempt, including failure,
+unless the run was cancelled. Its stdout is empty or a JSON object. Empty or
+`{}` accepts the attempt, and the run ends with the agent's status. To request
+another attempt:
+
+```json
+{"retry":true,"message":"The chart is missing; regenerate it."}
+```
+
+A retry starts immediately in the same run, with the same run ID, context,
+variables, and settings; prerun does not run again. The agent resumes the
+previous attempt's session, and its request is a retry note followed by
+`message`. An attempt that failed or timed out leaves no session, so its retry
+starts a fresh session with the original request followed by the note. Once
+`retries` are used up, a retry request fails the run with the message in its
+error. A retried run records each attempt's `status`, `error`, and `retry`
+message under `attempts` in its run record.
+
+Each attempt and its postrun get their own timeout, and the job stays busy, so
+scheduled occurrences are skipped meanwhile. Messages sent during an attempt are
+not withdrawn; a job that may retry should notify from postrun after accepting.
+In either hook, commands that print to stdout, such as `enso message send`,
+need `>&2`. Other postrun stdout, a non-zero exit, or a timeout fails the run
+without a retry.

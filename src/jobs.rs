@@ -13,6 +13,9 @@ use serde_json::Value;
 
 use crate::config::{Destination, Execution};
 
+/// Upper bound on `retries`, since each retry is a full agent turn.
+pub const MAX_RETRIES: u32 = 10;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Job {
     pub name: String,
@@ -24,6 +27,7 @@ pub struct Job {
     pub notify: Option<Destination>,
     pub prerun: bool,
     pub postrun: bool,
+    pub retries: u32,
 }
 
 #[derive(Default, Deserialize)]
@@ -78,6 +82,8 @@ struct Definition {
     execution: Overrides,
     #[serde(default)]
     notify: Option<Destination>,
+    #[serde(default)]
+    retries: u32,
 }
 
 fn enabled() -> bool {
@@ -127,6 +133,10 @@ pub fn load(home: &Path, name: &str, defaults: &Execution) -> Result<Job> {
             .validate()
             .with_context(|| format!("job {name}: invalid notify"))?;
     }
+    ensure!(
+        definition.retries <= MAX_RETRIES,
+        "job {name}: retries must be at most {MAX_RETRIES}"
+    );
     let prompt = fs::read_to_string(directory.join("prompt.md"))
         .with_context(|| format!("job {name}: prompt.md is required"))?;
     ensure!(
@@ -145,6 +155,7 @@ pub fn load(home: &Path, name: &str, defaults: &Execution) -> Result<Job> {
         notify: definition.notify,
         prerun,
         postrun,
+        retries: definition.retries,
     })
 }
 
@@ -172,6 +183,29 @@ pub fn prerun_result(stdout: &str) -> Result<PreRun> {
         scalar(value)?;
     }
     Ok(result)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostRun {
+    #[serde(default)]
+    retry: bool,
+    message: Option<String>,
+}
+
+/// Returns the retry message when postrun asks for another attempt.
+pub fn postrun_result(stdout: &str) -> Result<Option<String>> {
+    if stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    let result: PostRun = serde_json::from_str(stdout)
+        .context("postrun stdout must be empty, {} or {\"retry\":true,\"message\":\"...\"}")?;
+    match (result.retry, result.message) {
+        (false, None) => Ok(None),
+        (true, Some(message)) if !message.trim().is_empty() => Ok(Some(message)),
+        (true, _) => bail!("postrun retry requires a nonempty message"),
+        (false, Some(_)) => bail!("postrun message is only allowed with retry"),
+    }
 }
 
 fn valid_key(key: &str) -> bool {
@@ -354,6 +388,16 @@ mod tests {
         let jobs = list(temp.path(), &defaults()).unwrap();
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].enabled && jobs[0].prerun && !jobs[0].postrun);
+        assert_eq!(jobs[0].retries, 0);
+        fs::write(directory.join("job.json"), r#"{"retries":10}"#).unwrap();
+        assert_eq!(
+            load(temp.path(), "report", &defaults()).unwrap().retries,
+            10
+        );
+        fs::write(directory.join("job.json"), r#"{"retries":11}"#).unwrap();
+        assert!(load(temp.path(), "report", &defaults()).is_err());
+        fs::write(directory.join("job.json"), r#"{"retries":-1}"#).unwrap();
+        assert!(load(temp.path(), "report", &defaults()).is_err());
         assert!(load(temp.path(), "../other", &defaults()).is_err());
     }
 
@@ -408,6 +452,27 @@ mod tests {
                 .unwrap()
                 .skip
         );
+    }
+
+    #[test]
+    fn postrun_accepts_or_requests_a_retry_with_a_message() {
+        assert_eq!(postrun_result("").unwrap(), None);
+        assert_eq!(postrun_result("{}\n").unwrap(), None);
+        assert_eq!(postrun_result(r#"{"retry":false}"#).unwrap(), None);
+        assert_eq!(
+            postrun_result(r#"{"retry":true,"message":"Fix the chart"}"#).unwrap(),
+            Some("Fix the chart".into())
+        );
+        for invalid in [
+            "done",
+            r#"{"ok":true}"#,
+            r#"{"retry":true}"#,
+            r#"{"retry":true,"message":" "}"#,
+            r#"{"message":"Fix the chart"}"#,
+            "{}\n{}",
+        ] {
+            assert!(postrun_result(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
