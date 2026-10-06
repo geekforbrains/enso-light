@@ -5,6 +5,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 struct Service {
     name: String,
@@ -127,14 +128,16 @@ fn launchd_action(service: &Service, action: &str) -> Result<Value> {
             bail!("service is not installed; run enso service install");
         }
         if !loaded || action == "restart" {
-            manager(
-                "launchctl",
-                &[
-                    "bootstrap",
-                    &domain,
-                    service.file.to_str().context("service path is not UTF-8")?,
-                ],
-            )?;
+            let file = service.file.to_str().context("service path is not UTF-8")?;
+            // bootout returns before launchd finishes removing the job, so an
+            // immediate bootstrap can fail with an I/O error until it has.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while let Err(error) = manager("launchctl", &["bootstrap", &domain, file]) {
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         manager("launchctl", &["kickstart", &target])?;
     }
