@@ -130,7 +130,7 @@ pub async fn run(home: PathBuf) -> Result<()> {
             for(id,token)in &running{if db.cancelled(id)?{token.cancel();}}
             let now=Local::now();let key=now.format("%Y-%m-%dT%H:%M").to_string();
             if key!=minute {minute=key.clone();match jobs::list(&home,&config.execution){Ok(jobs)=>for job in jobs {if job.enabled && let Some(cron)=&job.cron && jobs::due(cron,now)?{db.enqueue_job(&job.name,"cron",Some(&key))?;}},Err(error)=>eprintln!("Job schedule: {error:#}")}}
-            while running.len()<4 {let Some(work)=db.claim()? else{break};let token=cancel.child_token();running.insert(work.id.clone(),token.clone());let (home,db,slack,config,env)=(home.clone(),db.clone(),slack.clone(),config.clone(),env.clone());tasks.spawn(async move{let id=work.id.clone();if let Err(error)=execute(&home,&db,&slack,&config,&env,&work,token).await{let error=redact(&format!("{error:#}"),&env,&config);eprintln!("Run {id}: {error}");let _=db.finish(&id,"failed","",Some(&error),None,&config.execution.cli);}id});}
+            dispatch_ready(&db, |work| {let token=cancel.child_token();running.insert(work.id.clone(),token.clone());let (home,db,slack,config,env)=(home.clone(),db.clone(),slack.clone(),config.clone(),env.clone());tasks.spawn(async move{let id=work.id.clone();if let Err(error)=execute(&home,&db,&slack,&config,&env,&work,token).await{let error=redact(&format!("{error:#}"),&env,&config);eprintln!("Run {id}: {error}");let _=db.finish(&id,"failed","",Some(&error),None,&config.execution.cli);}id});})?;
         }
       }}Ok(())
     }.await;
@@ -149,6 +149,14 @@ pub async fn run(home: PathBuf) -> Result<()> {
     db.runtime("stopped", None)?;
     result
 }
+
+fn dispatch_ready(db: &Db, mut start: impl FnMut(Run)) -> Result<()> {
+    while let Some(work) = db.claim()? {
+        start(work);
+    }
+    Ok(())
+}
+
 async fn socket_loop(slack: Slack, db: Db, tx: mpsc::Sender<Event>, cancel: CancellationToken) {
     let mut delay = 1;
     loop {

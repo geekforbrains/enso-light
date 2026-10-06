@@ -23,7 +23,10 @@ Names use letters, numbers, hyphens, and underscores. `prompt.md` must be nonemp
 `cron` uses five fields (minute, hour, day of month, month, day of week) and the
 machine's timezone. Omit it for a manual-only job. `enabled` defaults to true and
 controls scheduling; a disabled job can still be triggered manually.
-Missed occurrences during downtime are not replayed. A job never overlaps itself.
+Missed occurrences during downtime are not replayed. A job never overlaps itself:
+scheduled occurrences while it is queued or running are skipped without catch-up,
+and manual triggers while busy are rejected. Different jobs and Slack
+conversations can run in parallel without a global concurrency limit.
 Sunday is `0` or `7`; weekday names are supported. When both day-of-month and
 day-of-week are restricted, standard cron matches either restriction.
 
@@ -33,9 +36,9 @@ enso jobs run morning-report
 enso jobs run morning-report --wait
 ```
 
-`--wait` is for an operator's shell. Agents and hooks inside an Enso run must
-trigger jobs without it; waiting is rejected to avoid workers waiting on one
-another. Job definitions are reread each scheduler minute and at run start, so
+`--wait` waits for the job's result and can be used from a shell, agent, or hook.
+Without it, the command returns as soon as the job is queued.
+Job definitions are reread each scheduler minute and at run start, so
 job-file changes need no restart. Changes to `config.json` or `.env` require one.
 
 Manual and cron triggers use the same pipeline and fresh native sessions. Jobs

@@ -268,6 +268,110 @@ fn incoming(ts: &str, thread: Option<&str>, user: &str, name: &str, text: &str) 
 }
 
 #[tokio::test]
+async fn dispatch_runs_independent_work_without_a_cap_and_queues_busy_conversations() {
+    let fixture = Fixture::new(false);
+    let first = incoming("100.001", None, "U1", "Gavin", "First request");
+    let first = fixture.db.accept(&first, false).unwrap().unwrap();
+    let followup = incoming("101.001", Some("100.001"), "U1", "Gavin", "Follow-up");
+    let followup = fixture.db.accept(&followup, false).unwrap().unwrap();
+    let mut expected = std::collections::BTreeSet::from([first.run_id.unwrap()]);
+    for ts in ["200.001", "300.001"] {
+        let mut message = incoming(ts, None, "U1", "Gavin", "Independent thread");
+        message.channel = "C1".into();
+        message.channel_kind = "channel".into();
+        message.conversation_thread = Some(ts.into());
+        message.reply = Destination {
+            channel: "C1".into(),
+            thread: Some(ts.into()),
+        };
+        expected.insert(
+            fixture
+                .db
+                .accept(&message, false)
+                .unwrap()
+                .unwrap()
+                .run_id
+                .unwrap(),
+        );
+    }
+    for name in ["report", "backup", "review"] {
+        expected.insert(
+            fixture
+                .db
+                .enqueue_job(name, "manual", None)
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    let release = CancellationToken::new();
+    let (started, mut starts) = mpsc::channel(8);
+    let mut tasks = JoinSet::new();
+    {
+        let mut start = |work: Run| {
+            let (db, release, started) = (fixture.db.clone(), release.clone(), started.clone());
+            tasks.spawn(async move {
+                started.send(work.id.clone()).await.unwrap();
+                release.cancelled().await;
+                db.finish(&work.id, "succeeded", "done", None, Some(SESSION), "claude")
+                    .unwrap();
+            });
+        };
+        dispatch_ready(&fixture.db, &mut start).unwrap();
+        // New work must also start while more than four independent runs are active.
+        expected.insert(
+            fixture
+                .db
+                .enqueue_job("later", "manual", None)
+                .unwrap()
+                .unwrap(),
+        );
+        dispatch_ready(&fixture.db, &mut start).unwrap();
+    }
+    let mut actual = std::collections::BTreeSet::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for _ in 0..expected.len() {
+            actual.insert(starts.recv().await.unwrap());
+        }
+    })
+    .await
+    .expect("all independent runs should start before any finish");
+    assert_eq!(actual, expected);
+    for id in &actual {
+        assert_eq!(fixture.db.run(id).unwrap()["state"], "running");
+    }
+    assert_eq!(
+        fixture.db.run(followup.run_id.as_deref().unwrap()).unwrap()["state"],
+        "queued"
+    );
+    assert!(
+        fixture
+            .db
+            .enqueue_job("report", "cron", Some("2026-10-06T09:00"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(fixture.db.enqueue_job("report", "manual", None).is_err());
+
+    release.cancel();
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    let mut ready = Vec::new();
+    dispatch_ready(&fixture.db, |work| ready.push(work)).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, followup.run_id.unwrap());
+    assert_eq!(ready[0].session.as_deref(), Some(SESSION));
+    assert!(
+        fixture
+            .db
+            .enqueue_job("report", "cron", Some("2026-10-06T09:00"))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_and_background() {
     let fixture = Fixture::new(false);
     let first = incoming(

@@ -59,8 +59,9 @@ enso jobs list
 enso jobs run JOB
 ```
 
-Trigger jobs without `--wait` inside an Enso run; waiting there is rejected to
-keep workers from waiting on one another. Operators can use `--wait` from a shell.
+Add `--wait` when the current task needs the job's result before continuing.
+Otherwise the command returns as soon as the job is queued. Different jobs can
+run in parallel; a scheduled occurrence of an already busy job is skipped.
 
 Jobs live at `$ENSO_HOME/jobs/JOB/`. A required `prompt.md` is the user request;
 `job.json` sets `cron`, `enabled`, optional `execution` overrides and `notify`.

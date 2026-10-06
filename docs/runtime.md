@@ -12,10 +12,12 @@ delivery status, and scheduling cursors. Native CLIs own authentication, tools,
 permissions, and their underlying session files. Every agent runs in the same
 workspace; hooks run in their job directory.
 
-Chat turns are serialized within each conversation. Jobs and other conversations
-can run independently, with at most four active runs across the service. A run
-records the actual settings and injected metadata
-used for it. Settings are selected on each turn; provider-specific native
+Chat turns are serialized within each conversation. Each DM shares one session
+across its threads; channel threads have independent sessions. Different jobs
+and conversations run independently, with no global concurrency limit or setting.
+A job's scheduled occurrence is skipped if that job is already queued or running.
+A run records the actual settings and injected metadata used for it.
+Settings are selected on each turn; provider-specific native
 sessions cannot move between CLIs. Changing a conversation's CLI requires
 `!clear`. Jobs start a fresh session every run.
 

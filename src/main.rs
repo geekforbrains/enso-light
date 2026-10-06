@@ -192,13 +192,6 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Jobs {
             command: JobsCommand::Run { name, wait },
         } => {
-            ensure!(
-                !wait
-                    || std::env::var("ENSO_RUN_ID")
-                        .ok()
-                        .is_none_or(|s| s.is_empty()),
-                "Enso runs must trigger jobs without --wait so workers cannot wait on each other"
-            );
             active(&home)?;
             let loaded = config::load(&home)?;
             jobs::load(&home, &name, &loaded.config.execution)?;

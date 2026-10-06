@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
 };
 
 fn enso(home: &Path, args: &[&str]) -> Output {
@@ -144,6 +145,60 @@ fn jobs_list_reports_definitions_and_trigger_requires_a_running_service() {
     let overlap = enso(directory.path(), &["jobs", "run", "manual"]);
     assert!(!overlap.status.success());
     assert!(String::from_utf8_lossy(&overlap.stderr).contains("already queued or running"));
+}
+
+#[test]
+fn a_run_can_wait_for_another_jobs_result() {
+    let directory = configured_home();
+    add_job(directory.path(), "child", json!({}));
+    let _lock = app::lock(directory.path()).unwrap();
+    let db = Db::open(directory.path()).unwrap();
+    let parent = db.enqueue_job("parent", "manual", None).unwrap().unwrap();
+    assert_eq!(db.claim().unwrap().unwrap().id, parent);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_enso"))
+        .arg("--home")
+        .arg(directory.path())
+        .args(["--json", "jobs", "run", "child", "--wait"])
+        .env("ENSO_RUN_ID", &parent)
+        .env_remove("ENSO_HOME")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut child = None;
+    loop {
+        if let Some(work) = db.claim().unwrap() {
+            assert_eq!(work.job.as_deref(), Some("child"));
+            db.finish(
+                &work.id,
+                "succeeded",
+                "Child finished",
+                None,
+                None,
+                "claude",
+            )
+            .unwrap();
+            child = Some(work.id);
+        }
+        if command.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            command.kill().unwrap();
+            let output = command.wait_with_output().unwrap();
+            panic!(
+                "job wait did not finish: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = successful(command.wait_with_output().unwrap());
+    assert_eq!(result["id"], child.unwrap());
+    assert_eq!(result["state"], "succeeded");
+    assert_eq!(result["result"], "Child finished");
+    assert_eq!(db.run(&parent).unwrap()["state"], "running");
 }
 
 #[test]
