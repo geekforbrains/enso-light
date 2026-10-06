@@ -1,3 +1,0 @@
-## Workspace
-
-{{workspace_purpose}}
