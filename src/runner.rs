@@ -13,14 +13,15 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Execution;
+use crate::config::Provider;
 
 const MAX_STDOUT: usize = 16 * 1024 * 1024;
 const MAX_STDERR: usize = 1024 * 1024;
 
 pub struct Request {
     pub workspace: PathBuf,
-    pub settings: Execution,
+    pub settings: Provider,
+    pub timeout_seconds: u64,
     pub prompt: String,
     pub session_id: Option<String>,
     pub env: BTreeMap<String, String>,
@@ -59,7 +60,7 @@ pub async fn execute(request: Request, cancel: CancellationToken) -> Result<Outc
     let output = process(
         command,
         request.prompt.into_bytes(),
-        request.settings.timeout_seconds,
+        request.timeout_seconds,
         cancel,
     )
     .await?;
@@ -96,7 +97,7 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
         ]
         .map(str::to_owned)
         .to_vec(),
-        _ => bail!("execution.cli must be codex or claude"),
+        _ => bail!("provider cli must be codex or claude"),
     };
     args.extend(settings.args.clone());
     if let Some(model) = &settings.model {
@@ -267,7 +268,7 @@ fn failure_hint(message: &str) -> &'static str {
             .iter()
             .any(|s| lower.contains(s))
     {
-        "invalid_effort: check execution.effort for the selected CLI and model"
+        "invalid_effort: check the provider effort for the selected CLI and model"
     } else if lower.contains("model")
         && [
             "invalid",
@@ -279,12 +280,12 @@ fn failure_hint(message: &str) -> &'static str {
         .iter()
         .any(|s| lower.contains(s))
     {
-        "invalid_model: check execution.model for the selected CLI"
+        "invalid_model: check the provider model for the selected CLI"
     } else if ["approval", "permission denied", "permission prompt"]
         .iter()
         .any(|s| lower.contains(s))
     {
-        "permission_required: check the native CLI's permissions and execution.args"
+        "permission_required: check the native CLI's permissions and provider args"
     } else {
         "execution_failed: native CLI failed; inspect its local session for details"
     }
@@ -354,7 +355,7 @@ async fn process(
     command.process_group(0);
     let mut child = command
         .spawn()
-        .context("could not launch executable; check execution.executable and service PATH")?;
+        .context("could not launch executable; check the provider executable and service PATH")?;
     let group = ProcessGroup(child.id().context("child process has no ID")?);
     let mut stdin = child.stdin.take().context("child stdin missing")?;
     let stdout = child.stdout.take().context("child stdout missing")?;
@@ -433,14 +434,14 @@ mod tests {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         Request {
             workspace: root.into(),
-            settings: Execution {
+            settings: Provider {
                 cli: cli.into(),
                 executable: Some(executable.to_string_lossy().into_owned()),
                 model: None,
                 effort: None,
                 args: vec![],
-                timeout_seconds: 5,
             },
+            timeout_seconds: 5,
             prompt: "a literal `prompt` $(not a command)".into(),
             session_id: None,
             env: BTreeMap::new(),
@@ -509,7 +510,7 @@ mod tests {
             "sleep 30 &\necho $! > child-pid\nwait",
         );
         // Allow the shell to start under parallel CI load before testing timeout cleanup.
-        req.settings.timeout_seconds = 3;
+        req.timeout_seconds = 3;
         let error = execute(req, CancellationToken::new())
             .await
             .unwrap_err()

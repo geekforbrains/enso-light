@@ -72,7 +72,18 @@ pub fn upgrade_installed(home: &Path, executable: &Path) -> Result<bool> {
 }
 
 pub fn install(home: &Path) -> Result<Value> {
-    crate::config::load(home)?.config.validate()?;
+    let loaded = crate::config::load(home)?;
+    loaded.validate()?;
+    // The service unit does not inherit the installing shell's Slack tokens.
+    for name in ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"] {
+        ensure!(
+            loaded
+                .env
+                .get(name)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "{name} is blank in .env; the installed service reads Slack tokens only from .env"
+        );
+    }
     let service = service(home)?;
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let mut environment = BTreeMap::new();

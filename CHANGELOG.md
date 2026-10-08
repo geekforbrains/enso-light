@@ -5,6 +5,36 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Added
+
+- Named `providers` in `config.json`, each a `cli` (`claude` or `codex`) with
+  optional `model`, `effort`, `executable`, and `args`. Conversations use
+  `defaults.provider`; a job can name another with `provider`. See
+  [configuration](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#providers).
+- `defaults.timeout_seconds`, overridable per job with `timeout_seconds`.
+- `${ENSO_HOME}` in `config.json` expands to the Enso home in use.
+- `!status`, the run context, and stored run settings name the provider.
+
+### Changed
+
+- **Breaking:** `config.json` replaces `execution` with `defaults` and
+  `providers`. Rewrite it to the new shape; an old file fails to load with an
+  error instead of being misread.
+- **Breaking:** Slack tokens come only from `SLACK_BOT_TOKEN`,
+  `SLACK_APP_TOKEN`, and optional `SLACK_USER_TOKEN` in `.env` or the
+  environment; the installed service reads them only from `.env`. Remove
+  `bot_token`, `app_token`, and `user_token` from `slack` in `config.json`, and
+  set `SLACK_USER_TOKEN` in `.env` to keep workspace search.
+- A blank or left-out `model`, `effort`, or `executable` uses the CLI's own
+  default for Claude Code too; Enso no longer defaults Claude to `sonnet`/`high`.
+- `enso config check` reports the default `provider` name instead of `cli`.
+
+### Removed
+
+- **Breaking:** the job `execution` overrides object. Define a provider and set
+  the job's `provider` and `timeout_seconds` instead; see
+  [jobs](https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md).
+
 ## [0.1.1] - 2026-10-06
 
 ### Fixed

@@ -7,7 +7,8 @@ one SQLite database. Native CLIs keep their own authentication and sessions.
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/geekforbrains/enso-light/releases/latest/download/enso-installer.sh | sh
 enso init
-# Set ~/.enso/.env credentials and permitted Slack users in config.json.
+# Set providers.main.cli and permitted Slack users in config.json,
+# and the Slack tokens in ~/.enso/.env.
 enso config check
 enso service install
 enso service start

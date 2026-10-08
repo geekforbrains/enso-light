@@ -3,7 +3,7 @@
 Each job is a directory at `~/.enso/jobs/NAME/`:
 
 ```text
-job.json       # scheduling and optional execution overrides
+job.json       # scheduling, provider, timeout, and notification
 prompt.md      # required user message
 prerun.sh      # optional
 postrun.sh     # optional
@@ -15,7 +15,8 @@ Names use letters, numbers, hyphens, and underscores. `prompt.md` must be nonemp
 {
   "enabled": true,
   "cron": "0 9 * * 1-5",
-  "execution": { "effort": "high", "timeout_seconds": 600 },
+  "provider": "opus",
+  "timeout_seconds": 600,
   "notify": { "channel": "D012345" },
   "retries": 2
 }
@@ -26,6 +27,13 @@ conversation ID (`C…` for a channel, `G…` for a private channel, `D…` for 
 Add `"thread": "1700000000.000001"` with a root message timestamp to post in that
 thread. Enso checks the format when it loads the job; the bot must be able to post
 there. Leave it out for a job that never posts.
+
+`provider` optionally names one of the configured
+[providers](configuration.md#providers); without it the job uses
+`defaults.provider`. `timeout_seconds` optionally replaces
+`defaults.timeout_seconds` (greater than zero) for each of the job's processes:
+every agent attempt, prerun, and postrun. Enso rejects a job that names an
+unknown provider when it loads the job.
 
 `retries` is how many extra attempts postrun may request in one run (default 0,
 at most 10). See [Postrun and retries](#postrun-and-retries).
@@ -54,10 +62,9 @@ from the job itself.
 Job definitions are reread each scheduler minute and at run start, so
 job-file changes need no restart. Changes to `config.json` or `.env` require one.
 
-Manual and cron triggers use the same pipeline and fresh native sessions. Jobs
-inherit Enso's execution defaults and override individual fields. An explicit
-`args` array replaces the defaults; changing `cli` clears inherited
-CLI-specific model, effort, executable, and arguments. `prompt.md` is required
+Manual and cron triggers use the same pipeline and fresh native sessions. A job
+uses its provider's settings as defined; to change the model, effort, or
+arguments, define another provider and name it. `prompt.md` is required
 even when a prerun sometimes skips work. Final agent output is stored in SQLite;
 it is not automatically posted to Slack. Use `enso message send` from the agent
 or postrun when notification is wanted. Without `--to`, it posts to `notify`; a
@@ -96,9 +103,9 @@ the job's `notify` destination, and are empty without one.
 these metadata variables and overrides conflicting values from the inherited
 environment or `.env`.
 
-Job turns get separate guidance and metadata identifying the job, trigger,
-scheduled time, workspace, and notification destination. They never inherit a
-Slack sender's identity or a chat session.
+Job turns get separate guidance and metadata identifying the job, provider,
+trigger, scheduled time, workspace, and notification destination. They never
+inherit a Slack sender's identity or a chat session.
 
 ### Postrun and retries
 

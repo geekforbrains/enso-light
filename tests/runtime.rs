@@ -1,6 +1,6 @@
 //! Cross-module contracts exercised without Slack or native model processes.
 use enso::{
-    config::{Destination, Mentions, SlackConfig},
+    config::{Destination, Mentions, SlackConfig, Tokens},
     context,
     db::Db,
     formatting,
@@ -27,7 +27,7 @@ fn incoming(channel: &str, ts: &str, thread: Option<&str>) -> Incoming {
             thread: false,
         },
     );
-    let slack = Slack::new(&config).unwrap();
+    let slack = Slack::new(&config, &Tokens::default()).unwrap();
     let mut event = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":channel,"user":"U1","ts":ts,"text":"hello"}});
     if let Some(thread) = thread {
         event["event"]["thread_ts"] = json!(thread);

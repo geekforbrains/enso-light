@@ -16,17 +16,19 @@ Chat turns are serialized within each conversation. Each DM shares one session
 across its threads; channel threads have independent sessions. Different jobs
 and conversations run independently, with no global concurrency limit or setting.
 A job's scheduled occurrence is skipped if that job is already queued or running.
-A run records the actual settings and injected metadata used for it.
-Settings are selected on each turn; provider-specific native
-sessions cannot move between CLIs. Changing a conversation's CLI requires
-`!clear`. Jobs start a fresh session every run.
+A run records its provider name, CLI, executable, model, effort, arguments,
+timeout, and injected metadata. The provider is selected on each turn; switching
+to another provider with the same CLI keeps the session, but native sessions
+cannot move between CLIs. Changing a conversation's CLI requires `!clear`. Jobs
+start a fresh session every run.
 
 ## Prompt context
 
 The first Slack turn gets concise delivery and workspace guidance. Every turn
-gets fresh structured metadata identifying its source, sender, channel, message,
-reply destination, and attachments. Replies can follow a DM thread while sharing
-the DM's single session. Channel threads retain independent sessions.
+gets fresh structured metadata identifying its source, provider, sender,
+channel, message, reply destination, and attachments. Replies can follow a DM
+thread while sharing the DM's single session. Channel threads retain independent
+sessions.
 
 Jobs always get job-specific guidance and metadata. Rendered `prompt.md` is the
 user request. Confirmed background messages appear separately as previous context,

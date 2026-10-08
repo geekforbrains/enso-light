@@ -94,11 +94,12 @@ the calling turn ends. A job already queued or running skips scheduled
 occurrences without catch-up and rejects additional manual triggers.
 
 Jobs live at `$ENSO_HOME/jobs/JOB/`. A required `prompt.md` is the user request;
-`job.json` sets `cron`, `enabled`, optional `execution` overrides, and optional
-`notify`: where the job posts, `{"channel":"C…"}` for a channel or `D…` for a DM,
-plus `"thread":"TS"` for a thread. Omit it for a job that never posts. "Here"
-means this run's reply channel, and its thread only when the user means this
-thread; find other IDs with `enso slack channels`.
+`job.json` sets `cron`, `enabled`, an optional `provider` (a name from
+`providers` in `config.json`), optional `timeout_seconds` per process, and
+optional `notify`: where the job posts, `{"channel":"C…"}` for a channel or
+`D…` for a DM, plus `"thread":"TS"` for a thread. Omit it for a job that never
+posts. "Here" means this run's reply channel, and its thread only when the
+user means this thread; find other IDs with `enso slack channels`.
 Runs use the shared workspace and fresh native sessions. Optional `prerun.sh` and
 `postrun.sh` run with Bash from the job directory. Prerun stdout provides JSON;
 return `{"vars":{"NAME":"value"}}` to expand `{{NAME}}` in the prompt or
@@ -115,10 +116,11 @@ postrun after accepting, since sent messages are not withdrawn.
 
 ## Configuration and status
 
-`$ENSO_HOME` defaults to `~/.enso`. `config.json` has default execution and Slack
-settings; `.env` supplies child-process variables and `${NAME}` substitutions in
-configuration. Keep secrets in `.env`, never in prompts or replies. Restart after
-changing `config.json` or `.env`; job files are reread each minute and at run start.
+`$ENSO_HOME` defaults to `~/.enso`. `config.json` has `defaults`, named
+`providers`, and Slack settings; `.env` holds the Slack tokens and supplies
+child-process variables and `${NAME}` substitutions in configuration. Keep
+secrets in `.env`, never in prompts or replies. Restart after changing
+`config.json` or `.env`; job files are reread each minute and at run start.
 `enso config check`, `enso service status`, and
 `enso service logs` diagnose operation. `enso --help` shows the command syntax.
 

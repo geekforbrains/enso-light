@@ -29,16 +29,16 @@ workspace links. Add your own skills beside `enso`.
 
 ```json
 {
-  "execution": {
-    "cli": "claude",
-    "model": "sonnet",
-    "effort": "high",
-    "args": [],
+  "defaults": {
+    "provider": "main",
     "timeout_seconds": 1800
   },
+  "providers": {
+    "main": { "cli": "claude", "model": "sonnet", "effort": "high" },
+    "opus": { "cli": "claude", "model": "opus", "effort": "high", "args": ["--dangerously-skip-permissions"] },
+    "codex": { "cli": "codex", "executable": "${ENSO_HOME}/bin/codex" }
+  },
   "slack": {
-    "bot_token": "${SLACK_BOT_TOKEN}",
-    "app_token": "${SLACK_APP_TOKEN}",
     "dm_users": ["U012345"],
     "channels": {},
     "mentions": { "top_level": true, "thread": true }
@@ -46,13 +46,42 @@ workspace links. Add your own skills beside `enso`.
 }
 ```
 
-`cli` is `claude` or `codex`. The executable normally comes from `PATH`; set
-`execution.executable` to an explicit path if needed. Optional `model` and
-`effort` may be `null` to use native defaults; Codex also uses native defaults
-when these fields are omitted. `args` are literal additional
-arguments, not shell code. Your installed CLI must already be authenticated;
-configure its permissions for unattended operation through native settings or
-explicit arguments. Enso does not manage provider credentials.
+Unknown keys are errors, so a configuration from an older release fails to load
+instead of being misread.
+
+### defaults
+
+`defaults` holds the values that something more specific can override:
+
+| Field | Default | Overridden by |
+|---|---|---|
+| `provider` | required; must name a provider | job `provider` |
+| `timeout_seconds` | `1800`; must be greater than zero | job `timeout_seconds` |
+
+The timeout applies to each process separately: every agent attempt, prerun,
+and postrun. Attachment downloads stop after the timeout or 120 seconds,
+whichever is shorter.
+
+### providers
+
+Each provider is a named agent CLI setup; define at least one. Conversations use
+`defaults.provider`, and a job can choose another by name.
+
+| Field | Purpose |
+|---|---|
+| `cli` | Required: `claude` or `codex`. A blank value is an error. |
+| `model` | Optional model name |
+| `effort` | Optional reasoning effort |
+| `executable` | Optional path; otherwise the `cli` name is found on `PATH` |
+| `args` | Optional literal extra arguments (default `[]`), not shell code |
+
+A left-out or blank (`""`) `model`, `effort`, or `executable` uses the CLI's own
+default. `model` and `effort` must not start with `-`. Your installed CLI must
+already be authenticated; configure its permissions for unattended operation
+through native settings or explicit `args`. Enso does not manage provider
+credentials.
+
+### slack
 
 Slack accepts DMs only from `dm_users`, and channels only when their IDs appear in
 `channels`. Empty allowlists accept nothing. Add a channel with its mention rules:
@@ -77,20 +106,31 @@ Other optional Slack settings:
 | `working_reaction` | `thinking_face` |
 | `queued_message` | Acknowledges a turn queued behind another |
 | `timeout_message` | Explains that a turn timed out |
-| `user_token` | Optional user OAuth token for workspace message search; omit unless configured |
 
 ## Environment
 
 ```dotenv
+# Slack app credentials. Restart Enso after changes.
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
+# Optional: user token with search:read for workspace-wide search
+SLACK_USER_TOKEN=
 ```
+
+Slack tokens come only from the environment, never from `config.json`.
+`SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` are required; an empty
+`SLACK_USER_TOKEN` counts as unset. Enso keeps all three out of logs and error
+messages. Direct commands such as `enso slack` also accept tokens from the
+inherited environment, but the installed service reads them only from `.env`,
+so `enso service install` requires both required tokens there.
 
 Enso loads `.env` for agent CLIs and hooks, overriding inherited values of the
 same name. `${NAME}` in configuration string values uses this combined
-environment. Substitution happens once, with no shell evaluation; missing
-variables are errors. Quote literal values in `.env` using standard dotenv
-syntax. Never put credentials in prompts, starter guidance, or source control.
+environment, plus `${ENSO_HOME}`: the Enso home in use, which `.env` and the
+inherited environment cannot override. Substitution happens once, with no shell
+evaluation; missing variables are errors. Quote literal values in `.env` using
+standard dotenv syntax. Never put credentials in prompts, starter guidance, or
+source control.
 Restart after changing `config.json` or `.env`.
 Direct `enso slack` commands reload these files on each invocation.
 
@@ -136,10 +176,9 @@ a **user OAuth token** with `search:read`. Its results follow that user's Slack
 access and search settings. [Slack's method reference](https://docs.slack.dev/reference/methods/search.messages/)
 documents the supported query and pagination behavior.
 
-To enable it, add `"user_token": "${SLACK_USER_TOKEN}"` to `slack` in
-`config.json`, then set `SLACK_USER_TOKEN` in `.env`. Keep it absent when no
-authorized user token is available. Adding this optional key does not change
-the bot token or Socket Mode connection.
+To enable it, set `SLACK_USER_TOKEN` in `.env`. Leave it empty when no
+authorized user token is available. It does not change the bot token or Socket
+Mode connection.
 
 The existing bot setup is enough for `search --channel CHANNEL`, which scans
 one page of accessible history with a literal text filter. That operation does

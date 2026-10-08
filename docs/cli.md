@@ -52,7 +52,8 @@ Service installation uses launchd on macOS and systemd user services on Linux.
 It enables startup at login; `start` runs it now. Linux operation after logout
 requires your OS user's normal lingering/session configuration. Installation
 captures `HOME`, `PATH`, and native CLI configuration paths so the service can
-find the same authenticated CLI. Secrets stay in `.env` and are read at runtime.
+find the same authenticated CLI. Secrets stay in `.env` and are read at runtime;
+installation requires `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` there.
 Reinstall if the Enso executable or the relevant `PATH` changes. Uninstall stops
 the service and removes registration; it preserves the entire Enso home.
 
@@ -96,7 +97,8 @@ A failed download reports an error before starting the agent.
 
 ## Slack lookup and reactions
 
-`enso slack` commands call the Web API directly using configured tokens. They
+`enso slack` commands call the Web API directly using the Slack tokens from
+`.env` or the environment. They
 work without a running Enso service or a Socket Mode connection and always return
 JSON; global `--json` makes it compact. Incoming-message allowlists do not limit
 these calls: the token's Slack permissions and conversation access determine
@@ -138,7 +140,7 @@ Search has two modes:
   Continue with the returned cursor when more history is needed;
   an empty page of matches does not establish that the whole channel has none.
 - `enso slack search "in:engineering from:me release"` uses Slack's native
-  query syntax and requires the optional `slack.user_token` with `search:read`.
+  query syntax and requires the optional `SLACK_USER_TOKEN` with `search:read`.
   A bot token alone cannot perform this workspace search. See
   [search setup](configuration.md#workspace-search). Results retain Slack's
   `messages.matches` and native pagination fields.
@@ -157,7 +159,7 @@ enso slack react C012345 '1791295200.000100' eyes
 |---|---|
 | `!clear` | Clear an idle conversation's native session for the next turn |
 | `!stop` | Cancel its running turn and queued turns |
-| `!status` | Show execution settings and running/queued state |
+| `!status` | Show the default provider (CLI, model, effort) and running/queued state |
 | `!help` | Show the controls |
 
 Enso adds a working reaction while a turn runs, acknowledges queued turns, and

@@ -314,7 +314,7 @@ pub async fn execute(command: SlackCommand, slack: Slack) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SlackConfig;
+    use crate::config::{SlackConfig, Tokens};
     use clap::Parser;
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -329,15 +329,15 @@ mod tests {
             .unwrap()
             .command
     }
-    fn config() -> SlackConfig {
-        SlackConfig {
-            bot_token: "fake-bot".into(),
-            user_token: Some("fake-user".into()),
-            ..SlackConfig::default()
+    fn tokens() -> Tokens {
+        Tokens {
+            bot: "fake-bot".into(),
+            user: Some("fake-user".into()),
+            ..Tokens::default()
         }
     }
     async fn fixture(
-        config: SlackConfig,
+        tokens: Tokens,
         responses: Vec<Value>,
     ) -> (Slack, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -383,7 +383,11 @@ mod tests {
             requests
         });
         (
-            Slack::with_test_endpoint(&config, format!("http://{address}")),
+            Slack::with_test_endpoint(
+                &SlackConfig::default(),
+                &tokens,
+                format!("http://{address}"),
+            ),
             task,
         )
     }
@@ -446,7 +450,7 @@ mod tests {
                 "conversations.replies",
             ),
         ] {
-            let (slack, server) = fixture(config(), vec![response.clone()]).await;
+            let (slack, server) = fixture(tokens(), vec![response.clone()]).await;
             assert_eq!(execute(command(&args), slack).await.unwrap(), response);
             let requests = server.await.unwrap();
             assert_eq!(requests.len(), 1);
@@ -461,7 +465,7 @@ mod tests {
     #[tokio::test]
     async fn history_bounds_and_permalink_are_sent_as_exact_string_parameters() {
         let (slack, server) = fixture(
-            config(),
+            tokens(),
             vec![
                 json!({"ok":true,"messages":[]}),
                 json!({"ok":true,"permalink":"https://example.invalid/permalink"}),
@@ -493,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_message_never_substitutes_an_adjacent_message() {
-        let (slack, server) = fixture(config(), vec![json!({"ok":true,"messages":[{"ts":"99.000001","text":"Wrong earlier message"}],"has_more":false})]).await;
+        let (slack, server) = fixture(tokens(), vec![json!({"ok":true,"messages":[{"ts":"99.000001","text":"Wrong earlier message"}],"has_more":false})]).await;
         let error = execute(command(&["message", "C1", "100.000001"]), slack)
             .await
             .unwrap_err()
@@ -510,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn exact_thread_message_selects_the_requested_reply_and_keeps_metadata() {
         let reply = json!({"ts":"105.000001","thread_ts":"100.000001","text":"Requested reply"});
-        let (slack, server) = fixture(config(), vec![json!({"ok":true,"messages":[{"ts":"100.000001","text":"Parent"},reply],"response_metadata":{"next_cursor":"more"}})]).await;
+        let (slack, server) = fixture(tokens(), vec![json!({"ok":true,"messages":[{"ts":"100.000001","text":"Parent"},reply],"response_metadata":{"next_cursor":"more"}})]).await;
         let result = execute(
             command(&["message", "C1", "105.000001", "--thread", "100.000001"]),
             slack,
@@ -555,7 +559,7 @@ mod tests {
                 "thread_history",
             ),
         ] {
-            let (slack, server) = fixture(config(), vec![response.clone()]).await;
+            let (slack, server) = fixture(tokens(), vec![response.clone()]).await;
             let result = execute(command(&args), slack).await.unwrap();
             assert_eq!(result["mode"], mode);
             assert_eq!(result["scanned"], 3);
@@ -578,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_search_does_not_mistake_an_empty_page_for_end_of_history() {
-        let (slack, server) = fixture(config(), vec![json!({"ok":true,"messages":[],"response_metadata":{"next_cursor":"next-empty-page"}})]).await;
+        let (slack, server) = fixture(tokens(), vec![json!({"ok":true,"messages":[],"response_metadata":{"next_cursor":"next-empty-page"}})]).await;
         let result = execute(
             command(&["search", "term", "--channel", "C1", "--cursor", "previous"]),
             slack,
@@ -596,9 +600,9 @@ mod tests {
     #[tokio::test]
     async fn native_search_uses_only_user_token_and_native_cursor_parameters() {
         let response = json!({"ok":true,"query":"in:general report","messages":{"matches":[],"pagination":{"total_count":12},"next_cursor":"next-native"}});
-        let mut config = config();
-        config.bot_token.clear();
-        let (slack, server) = fixture(config, vec![response.clone(), response.clone()]).await;
+        let mut tokens = tokens();
+        tokens.bot.clear();
+        let (slack, server) = fixture(tokens, vec![response.clone(), response.clone()]).await;
         for args in [
             vec!["search", "in:general report"],
             vec![
@@ -630,17 +634,21 @@ mod tests {
 
     #[tokio::test]
     async fn missing_tokens_and_bad_identifiers_fail_without_a_network_request() {
-        let slack = Slack::with_test_endpoint(&SlackConfig::default(), "http://127.0.0.1:1".into());
+        let slack = Slack::with_test_endpoint(
+            &SlackConfig::default(),
+            &Tokens::default(),
+            "http://127.0.0.1:1".into(),
+        );
         let error = execute(command(&["search", "term"]), slack.clone())
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("user_token") && error.contains("search:read"));
+        assert!(error.contains("SLACK_USER_TOKEN") && error.contains("search:read"));
         let error = execute(command(&["users"]), slack.clone())
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("bot_token is not configured"));
+        assert!(error.contains("SLACK_BOT_TOKEN is not set"));
         assert!(
             execute(command(&["history", "not-a-channel-id"]), slack.clone())
                 .await
@@ -660,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn scope_errors_are_actionable_and_credentials_and_query_are_never_echoed() {
         let (slack, server) = fixture(
-            config(),
+            tokens(),
             vec![
                 json!({"ok":false,"error":"missing_scope","needed":"fake-user"}),
                 json!({"ok":false,"error":"invalid_auth"}),
@@ -685,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn reaction_commands_reuse_idempotent_add_and_remove() {
         let (slack, server) = fixture(
-            config(),
+            tokens(),
             vec![
                 json!({"ok":false,"error":"already_reacted"}),
                 json!({"ok":false,"error":"no_reaction"}),

@@ -1,21 +1,24 @@
 use super::*;
-use crate::config::Destination;
+use crate::config::{Destination, Tokens};
 use std::{fs, os::unix::fs::PermissionsExt};
 
 const SESSION: &str = "00000000-0000-0000-0000-000000000123";
 
 #[test]
 fn runtime_errors_redact_literal_search_credentials_and_environment_values() {
-    let mut config = Config::default();
-    config.slack.bot_token = "fake-bot-credential".into();
-    config.slack.app_token = "fake-app-credential".into();
-    config.slack.user_token = Some("fake-user-credential".into());
-    let env = BTreeMap::from([("PROVIDER_SECRET".into(), "fake-provider-credential".into())]);
+    let loaded = Loaded {
+        config: serde_json::from_str(r#"{"defaults":{"provider":"main"}}"#).unwrap(),
+        env: BTreeMap::from([("PROVIDER_SECRET".into(), "fake-provider-credential".into())]),
+        tokens: Tokens {
+            bot: "fake-bot-credential".into(),
+            app: "fake-app-credential".into(),
+            user: Some("fake-user-credential".into()),
+        },
+    };
     assert_eq!(
         redact(
             "failure: fake-bot-credential fake-app-credential fake-user-credential fake-provider-credential",
-            &env,
-            &config,
+            &loaded,
         ),
         "failure: [redacted] [redacted] [redacted] [redacted]",
     );
@@ -24,8 +27,7 @@ fn runtime_errors_redact_literal_search_credentials_and_environment_values() {
 struct Fixture {
     home: tempfile::TempDir,
     db: Db,
-    config: Config,
-    env: BTreeMap<String, String>,
+    loaded: Loaded,
     slack: Slack,
 }
 
@@ -55,17 +57,26 @@ impl Fixture {
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            home.path().join("config.json"),
+            json!({
+                "defaults": {"provider": "main", "timeout_seconds": 5},
+                "providers": {
+                    "main": {"cli": "claude", "executable": executable},
+                    "opus": {"cli": "claude", "executable": executable, "model": "opus", "effort": "low", "args": ["--opus"]}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
         let loaded = config::load(home.path()).unwrap();
-        let mut config = loaded.config;
-        config.execution.executable = Some(executable.to_string_lossy().into_owned());
-        config.execution.timeout_seconds = 5;
+        loaded.validate().unwrap();
         let db = Db::open(home.path()).unwrap();
-        let slack = Slack::new(&config.slack).unwrap();
+        let slack = Slack::new(&loaded.config.slack, &loaded.tokens).unwrap();
         Self {
             home,
             db,
-            config,
-            env: loaded.env,
+            loaded,
             slack,
         }
     }
@@ -94,8 +105,7 @@ impl Fixture {
             self.home.path(),
             &self.db,
             &self.slack,
-            &self.config,
-            &self.env,
+            &self.loaded,
             run,
             CancellationToken::new(),
         )
@@ -179,8 +189,12 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     assert_eq!(header["notification_target"]["channel"], "DREPORT");
     assert!(header.get("sender").is_none());
     assert!(header.get("conversation_id").is_none());
+    assert_eq!(settings["provider"], "main");
     assert_eq!(settings["cli"], "claude");
+    assert!(settings["model"].is_null() && settings["effort"].is_null());
+    assert_eq!(settings["args"], json!([]));
     assert_eq!(settings["timeout_seconds"], 5);
+    assert_eq!(header["provider"], "main");
     assert_eq!(json_file(&directory.join("prerun-input.json")), header);
     let post = json_file(&directory.join("postrun-input.json"));
     assert_eq!(post["run_id"], run.id);
@@ -529,8 +543,7 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
         fixture.home.path(),
         &fixture.db,
         &fixture.slack,
-        &fixture.config,
-        &fixture.env,
+        &fixture.loaded,
         &run,
         Some(&first),
         CancellationToken::new(),
@@ -609,15 +622,14 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(accepted_second.conversation_id, accepted.conversation_id);
     let resumed = fixture.db.claim().unwrap().unwrap();
     assert_eq!(resumed.session.as_deref(), Some(SESSION));
-    let mut current_config = fixture.config.clone();
-    current_config.execution.model = Some("opus".into());
-    current_config.execution.effort = Some("low".into());
+    let mut current = fixture.loaded.clone();
+    current.config.defaults.provider = "opus".into();
+    current.config.defaults.timeout_seconds = 7;
     let completion = execute_inner(
         fixture.home.path(),
         &fixture.db,
         &fixture.slack,
-        &current_config,
-        &fixture.env,
+        &current,
         &resumed,
         Some(&second),
         CancellationToken::new(),
@@ -637,8 +649,12 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(header["reply"]["thread"], "1700000001.000001");
     assert_eq!(header["background_ids"], json!([second_background]));
     assert_eq!(header["attachments"], json!([]));
+    assert_eq!(settings["provider"], "opus");
     assert_eq!(settings["model"], "opus");
     assert_eq!(settings["effort"], "low");
+    assert_eq!(settings["args"], json!(["--opus"]));
+    assert_eq!(settings["timeout_seconds"], 7);
+    assert_eq!(header["provider"], "opus");
     assert_eq!(
         fixture.captured("env", &resumed),
         "available-from-dotenv\nslack\n\nDCHAT\n1700000001.000001\n"
@@ -647,4 +663,220 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert!(args.contains(&format!("--resume\n{SESSION}\n")));
     assert!(args.contains("--model\nopus\n"));
     assert!(args.contains("--effort\nlow\n"));
+}
+
+#[tokio::test]
+async fn resuming_a_session_under_a_provider_with_another_cli_requires_clear() {
+    let fixture = Fixture::new(false);
+    let first = incoming("1700000001.000001", None, "U1", "Gavin", "First");
+    fixture.db.accept(&first, false).unwrap().unwrap();
+    let run = fixture.db.claim().unwrap().unwrap();
+    let completion = execute_inner(
+        fixture.home.path(),
+        &fixture.db,
+        &fixture.slack,
+        &fixture.loaded,
+        &run,
+        Some(&first),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    fixture
+        .db
+        .finish(
+            &run.id,
+            &completion.0,
+            &completion.1,
+            completion.2.as_deref(),
+            completion.3.as_deref(),
+            &completion.4,
+        )
+        .unwrap();
+    let second = incoming(
+        "1700000002.000001",
+        Some("1700000001.000001"),
+        "U1",
+        "Gavin",
+        "Second",
+    );
+    fixture.db.accept(&second, false).unwrap().unwrap();
+    let resumed = fixture.db.claim().unwrap().unwrap();
+    assert_eq!(resumed.session.as_deref(), Some(SESSION));
+    let mut current = fixture.loaded.clone();
+    let mut codex = current.config.providers["main"].clone();
+    codex.cli = "codex".into();
+    current.config.providers.insert("codex".into(), codex);
+    current.config.defaults.provider = "codex".into();
+    let error = execute_inner(
+        fixture.home.path(),
+        &fixture.db,
+        &fixture.slack,
+        &current,
+        &resumed,
+        Some(&second),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Configured CLI changed"), "{error}");
+    assert!(
+        !fixture
+            .home
+            .path()
+            .join("workspace")
+            .join(format!("input-{}.txt", resumed.id))
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn attachment_download_uses_the_resolved_timeout() {
+    let fixture = Fixture::new(false);
+    let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slack = Slack::with_test_endpoint(
+        &fixture.loaded.config.slack,
+        &fixture.loaded.tokens,
+        format!("http://{}", stalled.local_addr().unwrap()),
+    );
+    let mut input = incoming("1700000001.000001", None, "U1", "Gavin", "Read this");
+    input.files = vec![crate::slack::RemoteFile {
+        id: "F1".into(),
+        name: "report.txt".into(),
+        media_type: None,
+        size: None,
+        download_url: None,
+    }];
+    fixture.db.accept(&input, false).unwrap().unwrap();
+    let run = fixture.db.claim().unwrap().unwrap();
+    let mut current = fixture.loaded.clone();
+    current.config.defaults.timeout_seconds = 1;
+    let started = std::time::Instant::now();
+    let error = execute_inner(
+        fixture.home.path(),
+        &fixture.db,
+        &slack,
+        &current,
+        &run,
+        Some(&input),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("timed_out: attachment download"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert!(!fixture.home.path().join("provider-ran").exists());
+}
+
+#[tokio::test]
+async fn jobs_select_a_named_provider_and_their_own_timeout() {
+    let fixture = Fixture::new(false);
+    let (run, directory) = fixture.job("chosen", "Use opus.", "cat >/dev/null\n");
+    fs::write(
+        directory.join("job.json"),
+        r#"{"provider":"opus","timeout_seconds":9}"#,
+    )
+    .unwrap();
+    fixture.run_job(&run).await;
+    assert_eq!(fixture.db.run(&run.id).unwrap()["state"], "succeeded");
+    let (_, header, settings) = fixture.snapshot(&run);
+    assert_eq!(header["provider"], "opus");
+    assert_eq!(settings["provider"], "opus");
+    assert_eq!(settings["timeout_seconds"], 9);
+    let args = fixture.captured("args", &run);
+    assert!(
+        args.contains("--opus\n--model\nopus\n--effort\nlow\n"),
+        "{args}"
+    );
+    let post = json_file(&directory.join("postrun-input.json"));
+    assert_eq!(post["provider"], "opus");
+}
+
+// The fixture default is 5s, so each 3s process only times out under the job's 1s override.
+#[tokio::test]
+async fn job_timeout_overrides_the_default_for_prerun() {
+    let fixture = Fixture::new(false);
+    let (run, directory) = fixture.job("slow", "Never runs.", "cat >/dev/null\nsleep 3\n");
+    fs::write(directory.join("job.json"), r#"{"timeout_seconds":1}"#).unwrap();
+    fixture.run_job(&run).await;
+    let outcome = fixture.db.run(&run.id).unwrap();
+    assert_eq!(outcome["state"], "timed_out", "{outcome}");
+    assert!(!fixture.home.path().join("provider-ran").exists());
+}
+
+#[tokio::test]
+async fn job_timeout_overrides_the_default_for_agent_attempts() {
+    let fixture = Fixture::new(false);
+    let slow = fixture.home.path().join("slow-claude");
+    fs::write(&slow, "#!/bin/bash\ncat >/dev/null\nsleep 3\n").unwrap();
+    fs::set_permissions(&slow, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut loaded = fixture.loaded.clone();
+    let mut provider = loaded.config.providers["main"].clone();
+    provider.executable = Some(slow.to_string_lossy().into());
+    loaded.config.providers.insert("slow".into(), provider);
+    let (run, directory) = fixture.job("slow", "Sleep.", "cat >/dev/null\n");
+    fs::write(
+        directory.join("job.json"),
+        r#"{"provider":"slow","timeout_seconds":1}"#,
+    )
+    .unwrap();
+    execute(
+        fixture.home.path(),
+        &fixture.db,
+        &fixture.slack,
+        &loaded,
+        &run,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let outcome = fixture.db.run(&run.id).unwrap();
+    assert_eq!(outcome["state"], "timed_out", "{outcome}");
+    let post = json_file(&directory.join("postrun-input.json"));
+    assert_eq!(post["status"], "timed_out");
+}
+
+#[tokio::test]
+async fn job_timeout_overrides_the_default_for_postrun() {
+    let fixture = Fixture::new(false);
+    let (run, directory) = fixture.job("slow", "Finish.", "cat >/dev/null\n");
+    fs::write(directory.join("job.json"), r#"{"timeout_seconds":1}"#).unwrap();
+    fs::write(directory.join("postrun.sh"), "cat >/dev/null\nsleep 3\n").unwrap();
+    fixture.run_job(&run).await;
+    let outcome = fixture.db.run(&run.id).unwrap();
+    assert_eq!(outcome["state"], "failed", "{outcome}");
+    let error = outcome["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("postrun:") && error.contains("timed_out"),
+        "{error}"
+    );
+}
+
+#[test]
+fn status_reports_the_default_provider_and_native_defaults() {
+    let fixture = Fixture::new(false);
+    let mut config = fixture.loaded.config.clone();
+    config.slack.dm_users = vec!["U1".into()];
+    let slack = Slack::new(&config.slack, &Tokens::default()).unwrap();
+    let status = |config: &Config, ts: &str| {
+        let payload = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":"D1","channel_type":"im","user":"U1","ts":ts,"text":"!status"}});
+        accept_event(&fixture.db, &slack, config, "UBOT", &payload).unwrap();
+        fixture
+            .db
+            .claim_delivery()
+            .unwrap()
+            .unwrap()
+            .payload
+            .to_string()
+    };
+    let text = status(&config, "1700000001.000001");
+    assert!(
+        text.contains("Enso: main (claude / native default / native default)"),
+        "{text}"
+    );
+    config.defaults.provider = "opus".into();
+    let text = status(&config, "1700000002.000001");
+    assert!(text.contains("Enso: opus (claude / opus / low)"), "{text}");
 }

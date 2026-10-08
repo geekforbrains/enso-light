@@ -1,6 +1,6 @@
 //! The daemon coordinates the database queue, native processes and Slack delivery.
 use crate::{
-    config::{self, Config},
+    config::{self, Config, Loaded},
     context,
     db::{Db, Run},
     formatting, jobs, runner,
@@ -52,13 +52,9 @@ fn time(ms: i64) -> String {
         .with_timezone(&Local)
         .to_rfc3339()
 }
-fn redact(error: &str, env: &BTreeMap<String, String>, config: &Config) -> String {
+fn redact(error: &str, loaded: &Loaded) -> String {
     let mut result = error.to_owned();
-    for secret in env
-        .values()
-        .chain([&config.slack.bot_token, &config.slack.app_token])
-        .chain(config.slack.user_token.iter())
-    {
+    for secret in loaded.env.values().chain(loaded.tokens.secrets()) {
         if secret.len() >= 4 {
             result = result.replace(secret, "[redacted]");
         }
@@ -72,14 +68,14 @@ struct Event {
 }
 pub async fn run(home: PathBuf) -> Result<()> {
     let loaded = config::load(&home)?;
-    loaded.config.validate()?;
-    jobs::list(&home, &loaded.config.execution)?;
+    loaded.validate()?;
+    jobs::list(&home, &loaded.config)?;
     let _lock = lock(&home)?;
     let db = Db::open(&home)?;
     db.runtime("starting", None)?;
-    let config = Arc::new(loaded.config);
-    let env = Arc::new(loaded.env);
-    let slack = Slack::new(&config.slack)?;
+    let slack = Slack::new(&loaded.config.slack, &loaded.tokens)?;
+    let loaded = Arc::new(loaded);
+    let config = &loaded.config;
     let identity = slack
         .identity()
         .await
@@ -125,14 +121,14 @@ pub async fn run(home: PathBuf) -> Result<()> {
       loop {tokio::select! {
         _=tokio::signal::ctrl_c()=>break,
         _=signal.recv()=>break,
-        Some(event)=rx.recv()=>{let outcome=accept_event(&db,&slack,&config,&identity.bot_user_id,&event.payload);match outcome{Ok(())=>{let _=event.accepted.send(());},Err(error)=>eprintln!("Slack admission: {}",redact(&format!("{error:#}"),&env,&config))}},
+        Some(event)=rx.recv()=>{let outcome=accept_event(&db,&slack,config,&identity.bot_user_id,&event.payload);match outcome{Ok(())=>{let _=event.accepted.send(());},Err(error)=>eprintln!("Slack admission: {}",redact(&format!("{error:#}"),&loaded))}},
         Some(result)=tasks.join_next()=>{match result {Ok(id)=>{running.remove(&id);},Err(error)=>{return Err(anyhow::anyhow!("Execution worker stopped unexpectedly: {error}"))}}},
         _=tick.tick()=>{
             db.heartbeat()?;
             for(id,token)in &running{if db.cancelled(id)?{token.cancel();}}
             let now=Local::now();let key=now.format("%Y-%m-%dT%H:%M").to_string();
-            if key!=minute {minute=key.clone();match jobs::list(&home,&config.execution){Ok(jobs)=>for job in jobs {if job.enabled && let Some(cron)=&job.cron && jobs::due(cron,now)?{db.enqueue_job(&job.name,"cron",Some(&key))?;}},Err(error)=>eprintln!("Job schedule: {error:#}")}}
-            dispatch_ready(&db, |work| {let token=cancel.child_token();running.insert(work.id.clone(),token.clone());let (home,db,slack,config,env)=(home.clone(),db.clone(),slack.clone(),config.clone(),env.clone());tasks.spawn(async move{let id=work.id.clone();if let Err(error)=execute(&home,&db,&slack,&config,&env,&work,token).await{let error=redact(&format!("{error:#}"),&env,&config);eprintln!("Run {id}: {error}");let _=db.finish(&id,"failed","",Some(&error),None,&config.execution.cli);}id});})?;
+            if key!=minute {minute=key.clone();match jobs::list(&home,config){Ok(jobs)=>for job in jobs {if job.enabled && let Some(cron)=&job.cron && jobs::due(cron,now)?{db.enqueue_job(&job.name,"cron",Some(&key))?;}},Err(error)=>eprintln!("Job schedule: {error:#}")}}
+            dispatch_ready(&db, |work| {let token=cancel.child_token();running.insert(work.id.clone(),token.clone());let (home,db,slack,loaded)=(home.clone(),db.clone(),slack.clone(),loaded.clone());tasks.spawn(async move{let id=work.id.clone();if let Err(error)=execute(&home,&db,&slack,&loaded,&work,token).await{let error=redact(&format!("{error:#}"),&loaded);eprintln!("Run {id}: {error}");let _=db.finish(&id,"failed","",Some(&error),None,"");}id});})?;
         }
       }}Ok(())
     }.await;
@@ -257,7 +253,7 @@ fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Va
         Some(match command{
         "!clear"=>match db.clear(&accepted.conversation_id){Ok(())=>"Conversation cleared. Your next message starts a fresh session.".into(),Err(e)=>e.to_string()},
         "!stop"=>{db.stop(&accepted.conversation_id)?;"Stopped active and queued work in this conversation.".into()},
-        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;format!("Enso: {} / {} / {}\nRunning: {} · queued: {}\nSession: {}",config.execution.cli,config.execution.model.as_deref().unwrap_or("native default"),config.execution.effort.as_deref().unwrap_or("native default"),state["running"],state["queued"],if state["has_session"]==true{"active"}else{"not started"})},
+        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;let(name,provider)=config.provider(None)?;format!("Enso: {name} ({} / {} / {})\nRunning: {} · queued: {}\nSession: {}",provider.cli,provider.model.as_deref().unwrap_or("native default"),provider.effort.as_deref().unwrap_or("native default"),state["running"],state["queued"],if state["has_session"]==true{"active"}else{"not started"})},
         _=>"!clear — start a fresh session when idle\n!stop — cancel active and queued work\n!status — show session and queue\n!help — show these commands".into()
     })
     } else if accepted.busy {
@@ -281,11 +277,11 @@ async fn execute(
     home: &Path,
     db: &Db,
     slack: &Slack,
-    config: &Config,
-    base_env: &BTreeMap<String, String>,
+    loaded: &Loaded,
     work: &Run,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let config = &loaded.config;
     let incoming = if work.kind == "chat" {
         Some(serde_json::from_value::<Incoming>(work.input.clone())?)
     } else {
@@ -301,8 +297,7 @@ async fn execute(
         home,
         db,
         slack,
-        config,
-        base_env,
+        loaded,
         work,
         incoming.as_ref(),
         cancel.clone(),
@@ -311,7 +306,7 @@ async fn execute(
     let (mut state, text, error, session, provider) = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
-            let message = redact(&format!("{error:#}"), base_env, config);
+            let message = redact(&format!("{error:#}"), loaded);
             let state = if cancel.is_cancelled() || message.contains("cancelled") {
                 "cancelled"
             } else if message.contains("timed_out") {
@@ -324,7 +319,7 @@ async fn execute(
                 String::new(),
                 Some(message),
                 None,
-                config.execution.cli.clone(),
+                String::new(),
             )
         }
     };
@@ -376,26 +371,27 @@ async fn execute(
     Ok(())
 }
 type Completion = (String, String, Option<String>, Option<String>, String);
-#[allow(clippy::too_many_arguments)]
 async fn execute_inner(
     home: &Path,
     db: &Db,
     slack: &Slack,
-    config: &Config,
-    base_env: &BTreeMap<String, String>,
+    loaded: &Loaded,
     work: &Run,
     incoming: Option<&Incoming>,
     cancel: CancellationToken,
 ) -> Result<Completion> {
+    let (config, base_env) = (&loaded.config, &loaded.env);
     let job = work
         .job
         .as_ref()
-        .map(|name| jobs::load(home, name, &config.execution))
+        .map(|name| jobs::load(home, name, config))
         .transpose()?;
-    let settings = job
+    let (provider, settings) = config.provider(job.as_ref().and_then(|j| j.provider.as_deref()))?;
+    let (provider, settings) = (provider.to_owned(), settings.clone());
+    let timeout_seconds = job
         .as_ref()
-        .map(|j| j.settings.clone())
-        .unwrap_or_else(|| config.execution.clone());
+        .and_then(|j| j.timeout_seconds)
+        .unwrap_or(config.defaults.timeout_seconds);
     if work.session.is_some() {
         ensure!(
             work.provider.as_deref() == Some(settings.cli.as_str()),
@@ -438,7 +434,7 @@ async fn execute_inner(
             dest.thread.clone().unwrap_or_default(),
         );
     }
-    let mut header = json!({"source":if incoming.is_some(){"slack"}else{"job"},"run_id":work.id,"workspace":workspace,"received_at":time(work.created_at),"started_at":Local::now().to_rfc3339()});
+    let mut header = json!({"source":if incoming.is_some(){"slack"}else{"job"},"run_id":work.id,"provider":provider,"workspace":workspace,"received_at":time(work.created_at),"started_at":Local::now().to_rfc3339()});
     let background = if let Some(conv) = &work.conversation {
         db.background(conv)?
     } else {
@@ -472,7 +468,7 @@ async fn execute_inner(
         let directory = workspace.join("uploads").join(&work.id);
         let files = tokio::select! {
             _=cancel.cancelled()=>anyhow::bail!("cancelled"),
-            result=tokio::time::timeout(Duration::from_secs(settings.timeout_seconds.min(120)),slack.download(&input.files,&directory))=>result.context("timed_out: attachment download")??,
+            result=tokio::time::timeout(Duration::from_secs(timeout_seconds.min(120)),slack.download(&input.files,&directory))=>result.context("timed_out: attachment download")??,
         };
         db.record_attachments(&work.id, &files)?;
         images = files
@@ -500,7 +496,7 @@ async fn execute_inner(
                 &job.directory.join("prerun.sh"),
                 &header,
                 &env,
-                settings.timeout_seconds,
+                timeout_seconds,
                 cancel.clone(),
             )
             .await?;
@@ -527,12 +523,10 @@ async fn execute_inner(
         &background,
         &request,
     )?;
-    db.snapshot(
-        &work.id,
-        &prompt,
-        &header,
-        &serde_json::to_value(&settings)?,
-    )?;
+    let mut snapshot = serde_json::to_value(&settings)?;
+    snapshot["provider"] = json!(provider);
+    snapshot["timeout_seconds"] = json!(timeout_seconds);
+    db.snapshot(&work.id, &prompt, &header, &snapshot)?;
     let max_attempts = job.as_ref().map_or(0, |job| job.retries) + 1;
     let mut session = work.session.clone();
     let mut attempts = Vec::new();
@@ -542,6 +536,7 @@ async fn execute_inner(
             runner::Request {
                 workspace: workspace.clone(),
                 settings: settings.clone(),
+                timeout_seconds,
                 prompt,
                 session_id: session,
                 env: env.clone(),
@@ -553,7 +548,7 @@ async fn execute_inner(
         let (mut state, text, mut error, next_session) = match outcome {
             Ok(result) => ("succeeded".to_owned(), result.text, None, result.session_id),
             Err(error) => {
-                let error = redact(&format!("{error:#}"), base_env, config);
+                let error = redact(&format!("{error:#}"), loaded);
                 let state = if cancel.is_cancelled() || error.contains("cancelled") {
                     "cancelled"
                 } else if error.contains("timed_out") {
@@ -582,18 +577,18 @@ async fn execute_inner(
             &job.directory.join("postrun.sh"),
             &input,
             &env,
-            settings.timeout_seconds,
+            timeout_seconds,
             cancel.clone(),
         )
         .await
         .and_then(|output| jobs::postrun_result(&output))
         {
-            Ok(retry) => retry.map(|message| redact(&message, base_env, config)),
+            Ok(retry) => retry.map(|message| redact(&message, loaded)),
             Err(post_error) => {
                 state = "failed".into();
                 error = Some(format!(
                     "postrun: {}",
-                    redact(&format!("{post_error:#}"), base_env, config)
+                    redact(&format!("{post_error:#}"), loaded)
                 ));
                 None
             }

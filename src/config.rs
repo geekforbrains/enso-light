@@ -1,48 +1,60 @@
 use anyhow::{Context, Result, bail, ensure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::Path;
 
+/// A named agent CLI setup; blank optional fields use the CLI's native default.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Execution {
+#[serde(deny_unknown_fields)]
+pub struct Provider {
     pub cli: String,
+    #[serde(default, deserialize_with = "optional")]
     pub executable: Option<String>,
+    #[serde(default, deserialize_with = "optional")]
     pub model: Option<String>,
+    #[serde(default, deserialize_with = "optional")]
     pub effort: Option<String>,
+    #[serde(default)]
     pub args: Vec<String>,
-    pub timeout_seconds: u64,
 }
 
-impl Default for Execution {
-    fn default() -> Self {
-        Self {
-            cli: "claude".into(),
-            executable: None,
-            model: Some("sonnet".into()),
-            effort: Some("high".into()),
-            args: Vec::new(),
-            timeout_seconds: 1800,
-        }
-    }
+fn optional<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|s| !s.trim().is_empty()))
 }
 
-impl Execution {
-    pub fn validate(&self) -> Result<()> {
-        if !matches!(self.cli.as_str(), "claude" | "codex") {
-            bail!("execution.cli must be claude or codex");
-        }
-        if self.timeout_seconds == 0 {
-            bail!("execution.timeout_seconds must be greater than zero");
-        }
-        if self.executable.as_ref().is_some_and(|s| s.is_empty()) {
-            bail!("execution.executable must not be empty");
+impl Provider {
+    pub fn validate(&self, name: &str) -> Result<()> {
+        ensure!(
+            !self.cli.trim().is_empty(),
+            "providers.{name}.cli is blank; set \"claude\" or \"codex\""
+        );
+        ensure!(
+            matches!(self.cli.as_str(), "claude" | "codex"),
+            "providers.{name}.cli must be \"claude\" or \"codex\""
+        );
+        for (field, value) in [("model", &self.model), ("effort", &self.effort)] {
+            ensure!(
+                !value.as_ref().is_some_and(|s| s.starts_with('-')),
+                "providers.{name}.{field} must not start with -"
+            );
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Defaults {
+    pub provider: String,
+    #[serde(default = "timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+fn timeout_seconds() -> u64 {
+    1800
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,10 +114,6 @@ impl Default for Mentions {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
-    pub bot_token: String,
-    pub app_token: String,
-    /// Optional user OAuth token for Slack's workspace search API only.
-    pub user_token: Option<String>,
     pub dm_users: Vec<String>,
     pub channels: BTreeMap<String, Mentions>,
     pub mentions: Mentions,
@@ -117,9 +125,6 @@ pub struct SlackConfig {
 impl Default for SlackConfig {
     fn default() -> Self {
         Self {
-            bot_token: String::new(),
-            app_token: String::new(),
-            user_token: None,
             dm_users: Vec::new(),
             channels: BTreeMap::new(),
             mentions: Mentions::default(),
@@ -131,19 +136,38 @@ impl Default for SlackConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
-    pub execution: Execution,
+    pub defaults: Defaults,
+    #[serde(default)]
+    pub providers: BTreeMap<String, Provider>,
+    #[serde(default)]
     pub slack: SlackConfig,
 }
 
 impl Config {
     pub fn validate(&self) -> Result<()> {
-        self.execution.validate()?;
-        if self.slack.bot_token.is_empty() || self.slack.app_token.is_empty() {
-            bail!("Slack bot_token and app_token are required; set them in config.json or .env");
+        ensure!(
+            !self.providers.is_empty(),
+            "providers must define at least one provider"
+        );
+        for (name, provider) in &self.providers {
+            provider.validate(name)?;
         }
+        ensure!(
+            !self.defaults.provider.trim().is_empty(),
+            "defaults.provider is blank; name one of providers"
+        );
+        ensure!(
+            self.providers.contains_key(&self.defaults.provider),
+            "defaults.provider {:?} is not defined in providers",
+            self.defaults.provider
+        );
+        ensure!(
+            self.defaults.timeout_seconds > 0,
+            "defaults.timeout_seconds must be greater than zero"
+        );
         if self.slack.dm_users.iter().any(String::is_empty)
             || self.slack.channels.keys().any(String::is_empty)
         {
@@ -154,16 +178,64 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Resolves an explicit provider name, or `defaults.provider`.
+    pub fn provider<'a>(&'a self, name: Option<&'a str>) -> Result<(&'a str, &'a Provider)> {
+        let name = name.unwrap_or(&self.defaults.provider);
+        let provider = self
+            .providers
+            .get(name)
+            .with_context(|| format!("provider {name:?} is not defined in providers"))?;
+        Ok((name, provider))
+    }
 }
 
-#[derive(Debug)]
+/// Slack credentials from the environment, never from config.json.
+#[derive(Clone, Debug, Default)]
+pub struct Tokens {
+    pub bot: String,
+    pub app: String,
+    /// Optional user OAuth token for Slack's workspace search API only.
+    pub user: Option<String>,
+}
+
+impl Tokens {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("SLACK_BOT_TOKEN", &self.bot),
+            ("SLACK_APP_TOKEN", &self.app),
+        ] {
+            ensure!(!value.trim().is_empty(), "{name} is blank; set it in .env");
+        }
+        Ok(())
+    }
+
+    pub fn secrets(&self) -> impl Iterator<Item = &String> {
+        [&self.bot, &self.app].into_iter().chain(self.user.iter())
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Loaded {
     pub config: Config,
     /// Values from .env; child processes inherit the host environment first.
     pub env: BTreeMap<String, String>,
+    pub tokens: Tokens,
+}
+
+impl Loaded {
+    pub fn validate(&self) -> Result<()> {
+        self.config.validate()?;
+        self.tokens.validate()
+    }
 }
 
 pub fn load(home: &Path) -> Result<Loaded> {
+    load_with(home, std::env::vars().collect())
+}
+
+/// `.env` overrides the inherited environment; `ENSO_HOME` is always the home in use.
+fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loaded> {
     let mut env = BTreeMap::new();
     let dotenv = home.join(".env");
     if dotenv.exists() {
@@ -175,32 +247,29 @@ pub fn load(home: &Path) -> Result<Loaded> {
             env.insert(key, value);
         }
     }
-    let mut variables: BTreeMap<String, String> = std::env::vars().collect();
     variables.extend(env.clone());
+    let token = |name: &str| variables.get(name).cloned().unwrap_or_default();
+    let tokens = Tokens {
+        bot: token("SLACK_BOT_TOKEN"),
+        app: token("SLACK_APP_TOKEN"),
+        user: Some(token("SLACK_USER_TOKEN")).filter(|s| !s.trim().is_empty()),
+    };
+    variables.insert("ENSO_HOME".into(), home.to_string_lossy().into());
     let config = fs::read(home.join("config.json"))
         .context("cannot read Enso config.json; run enso init first")?;
     let mut value: serde_json::Value =
         serde_json::from_slice(&config).context("invalid Enso config.json")?;
     expand_value(&mut value, &variables)?;
-    native_defaults(&mut value);
     inherit_mentions(&mut value);
     // Avoid serde's invalid-value diagnostics echoing a substituted credential.
     let config: Config = serde_json::from_value(value).map_err(|_| {
         anyhow::anyhow!("invalid config.json fields or value types; see docs/configuration.md")
     })?;
-    Ok(Loaded { config, env })
-}
-
-fn native_defaults(value: &mut serde_json::Value) {
-    if let Some(execution) = value
-        .get_mut("execution")
-        .and_then(serde_json::Value::as_object_mut)
-        && execution.get("cli").and_then(serde_json::Value::as_str) == Some("codex")
-    {
-        for name in ["model", "effort"] {
-            execution.entry(name).or_insert(serde_json::Value::Null);
-        }
-    }
+    Ok(Loaded {
+        config,
+        env,
+        tokens,
+    })
 }
 
 fn inherit_mentions(value: &mut serde_json::Value) {
@@ -300,7 +369,7 @@ pub fn init(home: &Path) -> Result<()> {
     )?;
     create_file(
         &home.join(".env"),
-        "# Slack app credentials. Restart Enso after changes.\nSLACK_BOT_TOKEN=\nSLACK_APP_TOKEN=\n",
+        "# Slack app credentials. Restart Enso after changes.\nSLACK_BOT_TOKEN=\nSLACK_APP_TOKEN=\n# Optional: user token with search:read for workspace-wide search\nSLACK_USER_TOKEN=\n",
     )?;
     create_file(
         &home.join("workspace/AGENTS.md"),
@@ -381,6 +450,24 @@ mod tests {
         );
     }
 
+    const VALID: &str = r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}}}"#;
+
+    fn load_config(
+        config: &str,
+        dotenv: &str,
+        inherited: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Result<Loaded>) {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("config.json"), config).unwrap();
+        fs::write(temp.path().join(".env"), dotenv).unwrap();
+        let inherited = inherited
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let loaded = load_with(temp.path(), inherited);
+        (temp, loaded)
+    }
+
     #[test]
     fn load_resolves_dotenv_without_interpreting_json() {
         let temp = tempfile::tempdir().unwrap();
@@ -390,37 +477,155 @@ mod tests {
             "SLACK_BOT_TOKEN='token\"with-quote'\nSLACK_APP_TOKEN=app\n",
         )
         .unwrap();
-        let loaded = load(temp.path()).unwrap();
-        assert_eq!(loaded.config.slack.bot_token, "token\"with-quote");
-        assert_eq!(loaded.config.slack.app_token, "app");
+        let loaded = load_with(temp.path(), BTreeMap::new()).unwrap();
+        assert_eq!(loaded.tokens.bot, "token\"with-quote");
+        assert_eq!(loaded.tokens.app, "app");
         assert_eq!(loaded.env["SLACK_APP_TOKEN"], "app");
         assert!(loaded.config.slack.dm_users.is_empty());
-        assert!(loaded.config.slack.user_token.is_none());
-    }
-
-    #[test]
-    fn optional_search_token_uses_normal_environment_substitution() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(".env"),
-            "SLACK_USER_TOKEN=fake-search-user-token\n",
-        )
-        .unwrap();
-        fs::write(
-            temp.path().join("config.json"),
-            r#"{"slack":{"user_token":"${SLACK_USER_TOKEN}"}}"#,
-        )
-        .unwrap();
-        let loaded = load(temp.path()).unwrap();
-        assert_eq!(
-            loaded.config.slack.user_token.as_deref(),
-            Some("fake-search-user-token")
+        assert!(loaded.tokens.user.is_none());
+        let starter = &loaded.config.providers["main"];
+        assert!(starter.model.is_none() && starter.effort.is_none());
+        assert_eq!(loaded.config.defaults.timeout_seconds, 1800);
+        assert!(
+            loaded
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains(r#"providers.main.cli is blank; set "claude" or "codex""#)
         );
     }
 
     #[test]
+    fn tokens_come_from_the_environment_with_dotenv_taking_precedence() {
+        let (_temp, loaded) = load_config(
+            VALID,
+            "SLACK_BOT_TOKEN=dotenv-bot\nSLACK_USER_TOKEN=\n",
+            &[
+                ("SLACK_BOT_TOKEN", "inherited-bot"),
+                ("SLACK_APP_TOKEN", "inherited-app"),
+                ("SLACK_USER_TOKEN", "inherited-user"),
+            ],
+        );
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.tokens.bot, "dotenv-bot");
+        assert_eq!(loaded.tokens.app, "inherited-app");
+        assert!(loaded.tokens.user.is_none());
+        loaded.validate().unwrap();
+        let (_temp, loaded) = load_config(
+            VALID,
+            "SLACK_BOT_TOKEN=bot\nSLACK_USER_TOKEN=fake-search-user-token\n",
+            &[],
+        );
+        let loaded = loaded.unwrap();
+        assert_eq!(
+            loaded.tokens.user.as_deref(),
+            Some("fake-search-user-token")
+        );
+        assert!(
+            loaded
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("SLACK_APP_TOKEN is blank")
+        );
+        for old in [
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}},"slack":{"bot_token":"x"}}"#,
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}},"slack":{"user_token":"x"}}"#,
+            r#"{"execution":{"cli":"claude"}}"#,
+        ] {
+            assert!(load_config(old, "", &[]).1.is_err(), "{old}");
+        }
+        let leftover = r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}},"execution":{"cli":"claude"}}"#;
+        let error = format!("{:#}", load_config(leftover, "", &[]).1.unwrap_err());
+        assert!(error.contains("invalid config.json fields"), "{error}");
+    }
+
+    #[test]
+    fn enso_home_substitution_cannot_be_overridden() {
+        let config = r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude","executable":"${ENSO_HOME}/bin/claude"}}}"#;
+        let (temp, loaded) = load_config(
+            config,
+            "ENSO_HOME=/from/dotenv\n",
+            &[("ENSO_HOME", "/from/inherited")],
+        );
+        assert_eq!(
+            loaded.unwrap().config.providers["main"].executable,
+            Some(format!("{}/bin/claude", temp.path().display()))
+        );
+    }
+
+    #[test]
+    fn providers_resolve_by_name_with_blank_fields_as_native_defaults() {
+        let config = r#"{
+            "defaults": {"provider": "main", "timeout_seconds": 60},
+            "providers": {
+                "main": {"cli": "claude", "model": "sonnet", "effort": "high", "args": ["--x"]},
+                "codex": {"cli": "codex", "model": "", "effort": "", "executable": ""}
+            }
+        }"#;
+        let (_temp, loaded) = load_config(config, "", &[]);
+        let config = loaded.unwrap().config;
+        config.validate().unwrap();
+        assert_eq!(config.defaults.timeout_seconds, 60);
+        let (name, main) = config.provider(None).unwrap();
+        assert_eq!(name, "main");
+        assert_eq!(main.model.as_deref(), Some("sonnet"));
+        assert_eq!(main.args, ["--x"]);
+        let (name, codex) = config.provider(Some("codex")).unwrap();
+        assert_eq!(name, "codex");
+        assert!(codex.model.is_none() && codex.effort.is_none() && codex.executable.is_none());
+        assert!(codex.args.is_empty());
+        assert!(config.provider(Some("missing")).is_err());
+    }
+
+    #[test]
+    fn invalid_providers_and_defaults_are_rejected() {
+        for (config, message) in [
+            (
+                r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":""}}}"#,
+                r#"providers.main.cli is blank; set "claude" or "codex""#,
+            ),
+            (
+                r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"gemini"}}}"#,
+                "providers.main.cli must be",
+            ),
+            (
+                r#"{"defaults":{"provider":"other"},"providers":{"main":{"cli":"claude"}}}"#,
+                "defaults.provider \"other\" is not defined in providers",
+            ),
+            (
+                r#"{"defaults":{"provider":""},"providers":{"main":{"cli":"claude"}}}"#,
+                "defaults.provider is blank",
+            ),
+            (
+                r#"{"defaults":{"provider":"main"}}"#,
+                "at least one provider",
+            ),
+            (
+                r#"{"defaults":{"provider":"main","timeout_seconds":0},"providers":{"main":{"cli":"claude"}}}"#,
+                "timeout_seconds must be greater than zero",
+            ),
+            (
+                r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude","model":"--x"}}}"#,
+                "providers.main.model must not start with -",
+            ),
+        ] {
+            let (_temp, loaded) = load_config(config, "", &[]);
+            let error = loaded.unwrap().config.validate().unwrap_err().to_string();
+            assert!(error.contains(message), "{config}: {error}");
+        }
+        for config in [
+            r#"{"providers":{"main":{"cli":"claude"}}}"#,
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{}}}"#,
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude","timeout_seconds":5}}}"#,
+        ] {
+            assert!(load_config(config, "", &[]).1.is_err(), "{config}");
+        }
+    }
+
+    #[test]
     fn channel_mentions_inherit_global_then_override() {
-        let mut value = serde_json::json!({"slack": {
+        let mut value = serde_json::json!({"defaults":{"provider":"main"},"slack": {
             "mentions": {"top_level":false,"thread":false},
             "channels": {"C1":{},"C2":{"top_level":true}}
         }});
@@ -430,20 +635,5 @@ mod tests {
         assert!(!config.slack.channels["C1"].thread);
         assert!(config.slack.channels["C2"].top_level);
         assert!(!config.slack.channels["C2"].thread);
-    }
-
-    #[test]
-    fn codex_uses_native_defaults_when_model_and_effort_are_omitted() {
-        let mut value = serde_json::json!({"execution":{"cli":"codex"}});
-        native_defaults(&mut value);
-        let config: Config = serde_json::from_value(value).unwrap();
-        assert!(config.execution.model.is_none());
-        assert!(config.execution.effort.is_none());
-        let mut value =
-            serde_json::json!({"execution":{"cli":"codex","model":"chosen","effort":"low"}});
-        native_defaults(&mut value);
-        let config: Config = serde_json::from_value(value).unwrap();
-        assert_eq!(config.execution.model.as_deref(), Some("chosen"));
-        assert_eq!(config.execution.effort.as_deref(), Some("low"));
     }
 }

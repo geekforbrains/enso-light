@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
-use crate::config::{Destination, SlackConfig};
+use crate::config::{Destination, SlackConfig, Tokens};
 
 const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_FILES: usize = 20;
@@ -27,6 +27,7 @@ pub fn install_tls_provider() {
 #[derive(Clone)]
 pub struct Slack {
     config: SlackConfig,
+    tokens: Tokens,
     http: Client,
     base: String,
 }
@@ -84,9 +85,10 @@ pub struct Attachment {
 }
 
 impl Slack {
-    pub fn new(config: &SlackConfig) -> Result<Self> {
+    pub fn new(config: &SlackConfig, tokens: &Tokens) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
+            tokens: tokens.clone(),
             http: Client::builder()
                 .timeout(Duration::from_secs(90))
                 .connect_timeout(Duration::from_secs(15))
@@ -100,15 +102,14 @@ impl Slack {
     /// Only explicit rate-limit rejections are retried. A transport error may
     /// follow remote acceptance, so never blindly repeat a message or file share.
     async fn request(&self, method: &str, body: &Value, app_token: bool) -> Result<Value> {
-        let token = if app_token {
-            &self.config.app_token
+        let (token, name) = if app_token {
+            (&self.tokens.app, "SLACK_APP_TOKEN")
         } else {
-            &self.config.bot_token
+            (&self.tokens.bot, "SLACK_BOT_TOKEN")
         };
         ensure!(
             !token.trim().is_empty(),
-            "Slack {} is not configured",
-            if app_token { "app_token" } else { "bot_token" }
+            "{name} is not set; add it to .env"
         );
         self.request_with_token(method, body, token).await
     }
@@ -174,8 +175,8 @@ impl Slack {
     }
 
     pub(crate) async fn search_messages(&self, params: &Value) -> Result<Value> {
-        let token = self.config.user_token.as_deref().filter(|token| !token.trim().is_empty())
-            .context("Workspace search requires slack.user_token with search:read. Configure it in config.json using ${SLACK_USER_TOKEN}, or use search --channel CHANNEL to search one bot-accessible history page.")?;
+        let token = self.tokens.user.as_deref().filter(|token| !token.trim().is_empty())
+            .context("Workspace search requires SLACK_USER_TOKEN with search:read. Set it in .env, or use search --channel CHANNEL to search one bot-accessible history page.")?;
         let response = self
             .request_with_token("search.messages", params, token)
             .await?;
@@ -184,8 +185,8 @@ impl Slack {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_test_endpoint(config: &SlackConfig, base: String) -> Self {
-        let mut slack = Self::new(config).unwrap();
+    pub(crate) fn with_test_endpoint(config: &SlackConfig, tokens: &Tokens, base: String) -> Self {
+        let mut slack = Self::new(config, tokens).unwrap();
         slack.base = base;
         slack
     }
@@ -431,7 +432,7 @@ impl Slack {
             let response = self
                 .http
                 .get(address)
-                .bearer_auth(&self.config.bot_token)
+                .bearer_auth(&self.tokens.bot)
                 .send()
                 .await
                 .map_err(|_| anyhow!("Slack attachment download failed"))?;
@@ -646,7 +647,7 @@ fn check_api(method: &str, value: &Value) -> Result<()> {
         .unwrap_or("unknown_error");
     if code == "missing_scope" {
         let scopes = match method {
-            "search.messages" => "search:read on slack.user_token",
+            "search.messages" => "search:read on SLACK_USER_TOKEN",
             "conversations.history" | "conversations.replies" => {
                 "channels:history, groups:history, im:history or mpim:history on the bot token, matching the conversation type"
             }
@@ -676,7 +677,7 @@ fn check_api(method: &str, value: &Value) -> Result<()> {
     }
     if method == "search.messages" && code == "not_allowed_token_type" {
         bail!(
-            "Slack search.messages requires a user token with search:read in slack.user_token; bot tokens cannot perform workspace search."
+            "Slack search.messages requires a user token with search:read in SLACK_USER_TOKEN; bot tokens cannot perform workspace search."
         );
     }
     if matches!(
@@ -773,7 +774,7 @@ mod tests {
             ..SlackConfig::default()
         };
         config.channels.insert("C1".into(), Mentions::default());
-        Slack::new(&config).unwrap()
+        Slack::new(&config, &Tokens::default()).unwrap()
     }
 
     fn message(channel: &str, text: &str, thread: Option<&str>) -> Value {
@@ -969,7 +970,7 @@ mod tests {
         });
         let mut slack = slack();
         slack.base = format!("http://{address}");
-        slack.config.bot_token = "secret-bot-token".into();
+        slack.tokens.bot = "secret-bot-token".into();
         (slack, task)
     }
 

@@ -154,7 +154,7 @@ async fn execute(cli: Cli) -> Result<()> {
             config::init(&home)?;
             Db::open(&home)?;
             print(
-                &json!({"initialized":home,"next":"Set Slack credentials and allowed destinations, then run enso config check."}),
+                &json!({"initialized":home,"next":"Set providers.main.cli in config.json and the Slack tokens in .env, then run enso config check."}),
                 cli.json,
             );
         }
@@ -165,17 +165,17 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::Slack { command } => {
             let loaded = config::load(&home)?;
-            let slack = Slack::new(&loaded.config.slack)?;
+            let slack = Slack::new(&loaded.config.slack, &loaded.tokens)?;
             print(&slack_cli::execute(command, slack).await?, cli.json);
         }
         Command::Config {
             command: ConfigCommand::Check,
         } => {
             let loaded = config::load(&home)?;
-            loaded.config.validate()?;
-            let jobs = jobs::list(&home, &loaded.config.execution)?;
+            loaded.validate()?;
+            let jobs = jobs::list(&home, &loaded.config)?;
             print(
-                &json!({"valid":true,"cli":loaded.config.execution.cli,"jobs":jobs.len()}),
+                &json!({"valid":true,"provider":loaded.config.defaults.provider,"jobs":jobs.len()}),
                 cli.json,
             );
         }
@@ -185,7 +185,7 @@ async fn execute(cli: Cli) -> Result<()> {
             let loaded = config::load(&home)?;
             let db = Db::open(&home)?;
             let mut rows = Vec::new();
-            for job in jobs::list(&home, &loaded.config.execution)? {
+            for job in jobs::list(&home, &loaded.config)? {
                 let next = if job.enabled {
                     job.cron
                         .as_ref()
@@ -204,7 +204,7 @@ async fn execute(cli: Cli) -> Result<()> {
         } => {
             active(&home)?;
             let loaded = config::load(&home)?;
-            jobs::load(&home, &name, &loaded.config.execution)?;
+            jobs::load(&home, &name, &loaded.config)?;
             let db = Db::open(&home)?;
             let id = db
                 .enqueue_job(&name, "manual", None)?

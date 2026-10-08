@@ -11,7 +11,7 @@ use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{Destination, Execution};
+use crate::config::{Config, Destination};
 
 /// Upper bound on `retries`, since each retry is a full agent turn.
 pub const MAX_RETRIES: u32 = 10;
@@ -21,54 +21,14 @@ pub struct Job {
     pub name: String,
     pub directory: PathBuf,
     pub prompt: String,
-    pub settings: Execution,
+    pub provider: Option<String>,
+    pub timeout_seconds: Option<u64>,
     pub cron: Option<String>,
     pub enabled: bool,
     pub notify: Option<Destination>,
     pub prerun: bool,
     pub postrun: bool,
     pub retries: u32,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Overrides {
-    cli: Option<String>,
-    executable: Option<String>,
-    model: Option<String>,
-    effort: Option<String>,
-    args: Option<Vec<String>>,
-    timeout_seconds: Option<u64>,
-}
-
-impl Overrides {
-    fn apply(self, defaults: &Execution) -> Result<Execution> {
-        let changed_cli = self.cli.as_ref().is_some_and(|cli| cli != &defaults.cli);
-        let settings = Execution {
-            cli: self.cli.unwrap_or_else(|| defaults.cli.clone()),
-            executable: self.executable.or_else(|| {
-                (!changed_cli)
-                    .then(|| defaults.executable.clone())
-                    .flatten()
-            }),
-            model: self
-                .model
-                .or_else(|| (!changed_cli).then(|| defaults.model.clone()).flatten()),
-            effort: self
-                .effort
-                .or_else(|| (!changed_cli).then(|| defaults.effort.clone()).flatten()),
-            args: self.args.unwrap_or_else(|| {
-                if changed_cli {
-                    vec![]
-                } else {
-                    defaults.args.clone()
-                }
-            }),
-            timeout_seconds: self.timeout_seconds.unwrap_or(defaults.timeout_seconds),
-        };
-        settings.validate()?;
-        Ok(settings)
-    }
 }
 
 #[derive(Deserialize)]
@@ -79,7 +39,9 @@ struct Definition {
     #[serde(default = "enabled")]
     enabled: bool,
     #[serde(default)]
-    execution: Overrides,
+    provider: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
     #[serde(default)]
     notify: Option<Destination>,
     #[serde(default)]
@@ -90,7 +52,7 @@ fn enabled() -> bool {
     true
 }
 
-pub fn list(home: &Path, defaults: &Execution) -> Result<Vec<Job>> {
+pub fn list(home: &Path, config: &Config) -> Result<Vec<Job>> {
     let root = home.join("jobs");
     if !root.exists() {
         return Ok(vec![]);
@@ -105,13 +67,13 @@ pub fn list(home: &Path, defaults: &Execution) -> Result<Vec<Job>> {
             .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("job names must be UTF-8"))?;
-        jobs.push(load(home, &name, defaults)?);
+        jobs.push(load(home, &name, config)?);
     }
     jobs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(jobs)
 }
 
-pub fn load(home: &Path, name: &str, defaults: &Execution) -> Result<Job> {
+pub fn load(home: &Path, name: &str, config: &Config) -> Result<Job> {
     ensure!(
         !name.is_empty()
             && name
@@ -133,6 +95,15 @@ pub fn load(home: &Path, name: &str, defaults: &Execution) -> Result<Job> {
             .validate()
             .with_context(|| format!("job {name}: invalid notify"))?;
     }
+    if let Some(provider) = &definition.provider {
+        config
+            .provider(Some(provider))
+            .with_context(|| format!("job {name}: invalid provider"))?;
+    }
+    ensure!(
+        definition.timeout_seconds != Some(0),
+        "job {name}: timeout_seconds must be greater than zero"
+    );
     ensure!(
         definition.retries <= MAX_RETRIES,
         "job {name}: retries must be at most {MAX_RETRIES}"
@@ -149,7 +120,8 @@ pub fn load(home: &Path, name: &str, defaults: &Execution) -> Result<Job> {
         name: name.into(),
         directory,
         prompt,
-        settings: definition.execution.apply(defaults)?,
+        provider: definition.provider,
+        timeout_seconds: definition.timeout_seconds,
         cron: definition.cron,
         enabled: definition.enabled,
         notify: definition.notify,
@@ -342,38 +314,32 @@ mod tests {
     use super::*;
     use chrono::{Datelike, TimeZone};
 
-    fn defaults() -> Execution {
-        Execution {
-            cli: "claude".into(),
-            executable: Some("/bin/claude".into()),
-            model: Some("sonnet".into()),
-            effort: Some("high".into()),
-            args: vec!["--example".into()],
-            timeout_seconds: 90,
-        }
+    fn defaults() -> Config {
+        serde_json::from_str(
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}}}"#,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn jobs_inherit_overrides_and_switch_provider_without_old_flags() {
-        let base = defaults();
-        let settings = serde_json::from_str::<Overrides>(r#"{"args":[],"effort":"low"}"#)
-            .unwrap()
-            .apply(&base)
-            .unwrap();
-        assert_eq!(settings.model, base.model);
-        assert!(settings.args.is_empty());
-        assert_eq!(settings.effort.as_deref(), Some("low"));
-        let settings =
-            serde_json::from_str::<Overrides>(r#"{"cli":"codex","model":"codex-model"}"#)
-                .unwrap()
-                .apply(&base)
-                .unwrap();
-        assert_eq!(settings.cli, "codex");
-        assert_eq!(settings.model.as_deref(), Some("codex-model"));
-        assert!(
-            settings.executable.is_none() && settings.effort.is_none() && settings.args.is_empty()
-        );
-        assert_eq!(settings.timeout_seconds, 90);
+    fn jobs_choose_a_configured_provider_and_timeout_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("jobs/report");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
+        let load_with = |definition: &str| {
+            fs::write(directory.join("job.json"), definition).unwrap();
+            load(temp.path(), "report", &defaults())
+        };
+        let job = load_with("{}").unwrap();
+        assert!(job.provider.is_none() && job.timeout_seconds.is_none());
+        let job = load_with(r#"{"provider":"opus","timeout_seconds":600}"#).unwrap();
+        assert_eq!(job.provider.as_deref(), Some("opus"));
+        assert_eq!(job.timeout_seconds, Some(600));
+        let error = load_with(r#"{"provider":"missing"}"#).unwrap_err();
+        assert!(format!("{error:#}").contains("provider \"missing\" is not defined"));
+        assert!(load_with(r#"{"timeout_seconds":0}"#).is_err());
+        assert!(load_with(r#"{"execution":{"model":"opus"}}"#).is_err());
     }
 
     #[test]

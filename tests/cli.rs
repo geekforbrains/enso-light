@@ -18,6 +18,9 @@ fn enso(home: &Path, args: &[&str]) -> Output {
         .env_remove("ENSO_RUN_ID")
         .env_remove("ENSO_CHANNEL")
         .env_remove("ENSO_THREAD_TS")
+        .env_remove("SLACK_BOT_TOKEN")
+        .env_remove("SLACK_APP_TOKEN")
+        .env_remove("SLACK_USER_TOKEN")
         .output()
         .unwrap()
 }
@@ -36,7 +39,12 @@ fn configured_home() -> tempfile::TempDir {
     successful(enso(directory.path(), &["init"]));
     fs::write(
         directory.path().join(".env"),
-        "SLACK_BOT_TOKEN=fake-bot-token\nSLACK_APP_TOKEN=fake-app-token\n",
+        "SLACK_BOT_TOKEN=fake-bot-token\nSLACK_APP_TOKEN=fake-app-token\nSLACK_USER_TOKEN=\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("config.json"),
+        json!({"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}}}).to_string(),
     )
     .unwrap();
     directory
@@ -80,6 +88,24 @@ fn upgrade_rejects_a_service_registered_to_another_executable() {
             .output()
             .unwrap()
     };
+    let dotenv = fs::read_to_string(directory.path().join(".env")).unwrap();
+    fs::write(
+        directory.path().join(".env"),
+        "SLACK_BOT_TOKEN=fake-bot-token\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_enso"))
+        .arg("--home")
+        .arg(directory.path())
+        .args(["--json", "service", "install"])
+        .env("HOME", account.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SLACK_APP_TOKEN", "inherited-app-token")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("SLACK_APP_TOKEN is blank in .env"));
+    fs::write(directory.path().join(".env"), dotenv).unwrap();
     let installed = successful(run(&["service", "install"]));
     let file = Path::new(installed["file"].as_str().unwrap());
     fs::write(file, "a service registered to another executable").unwrap();
@@ -164,6 +190,49 @@ fn config_check_validates_jobs_locally_without_exposing_credentials() {
     assert!(error.contains("prompt.md"));
     assert!(!error.contains("fake-bot-token"));
     assert!(!error.contains("fake-app-token"));
+}
+
+#[test]
+fn config_check_requires_a_provider_cli_known_job_providers_and_env_tokens() {
+    let starter = tempfile::tempdir().unwrap();
+    successful(enso(starter.path(), &["init"]));
+    let dotenv = fs::read_to_string(starter.path().join(".env")).unwrap();
+    assert!(dotenv.contains("SLACK_BOT_TOKEN=\nSLACK_APP_TOKEN=\n"));
+    assert!(dotenv.contains("\nSLACK_USER_TOKEN=\n"));
+    let error = String::from_utf8(enso(starter.path(), &["config", "check"]).stderr).unwrap();
+    assert!(
+        error.contains(r#"providers.main.cli is blank; set \"claude\" or \"codex\""#),
+        "{error}"
+    );
+
+    let directory = configured_home();
+    add_job(directory.path(), "report", json!({"provider":"opus"}));
+    let valid = successful(enso(directory.path(), &["config", "check"]));
+    assert_eq!(valid["provider"], "main");
+    add_job(directory.path(), "report", json!({"provider":"missing"}));
+    let error = String::from_utf8(enso(directory.path(), &["config", "check"]).stderr).unwrap();
+    assert!(error.contains("job report: invalid provider"), "{error}");
+    add_job(directory.path(), "report", json!({}));
+    fs::write(
+        directory.path().join(".env"),
+        "SLACK_APP_TOKEN=fake-app-token\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_enso"))
+        .arg("--home")
+        .arg(directory.path())
+        .args(["--json", "config", "check"])
+        .env("SLACK_BOT_TOKEN", "inherited-bot-token")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = enso(directory.path(), &["config", "check"]);
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("SLACK_BOT_TOKEN is blank"), "{error}");
 }
 
 #[test]
@@ -279,7 +348,7 @@ fn slack_search_without_user_token_fails_locally_without_requiring_a_daemon() {
     assert!(!result.status.success());
     let error: Value = serde_json::from_slice(&result.stderr).unwrap();
     let message = error["error"].as_str().unwrap();
-    assert!(message.contains("user_token"), "{message}");
+    assert!(message.contains("SLACK_USER_TOKEN"), "{message}");
     assert!(message.contains("search:read"), "{message}");
     assert!(!message.contains("not running"));
     assert!(!message.contains("fake-bot-token"));
