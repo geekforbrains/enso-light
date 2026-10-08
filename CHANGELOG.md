@@ -5,11 +5,13 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-08
+
 ### Upgrading from 0.2.0
 
 1. `enso init` never overwrites files, so merge the new starter
-   [`AGENTS.md`](https://github.com/geekforbrains/enso-light/blob/main/bundled/AGENTS.md)
-   and [`enso` skill](https://github.com/geekforbrains/enso-light/blob/main/bundled/SKILL.md)
+   [`AGENTS.md`](https://github.com/geekforbrains/enso-light/blob/v0.3.0/bundled/AGENTS.md)
+   and [`enso` skill](https://github.com/geekforbrains/enso-light/blob/v0.3.0/bundled/SKILL.md)
    into `~/.enso/AGENTS.md` and `~/.enso/.agents/skills/enso/SKILL.md` by hand.
    Enso no longer adds this guidance in code, so without the merge agents lose it.
 2. Update hooks that read removed fields from stdin: `.workspace.path` is
@@ -19,7 +21,7 @@ Versioning and publication follow the [release flow](docs/releases.md).
    `.received_at`, `.started_at`, `.conversation_id`, and `.background_ids`
    have no replacement; the job's `job.json` names its workspace and provider.
 3. Create any configured workspace directory that does not exist yet, as in
-   [adding a workspace](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#adding-a-workspace);
+   [adding a workspace](https://github.com/geekforbrains/enso-light/blob/v0.3.0/docs/configuration.md#adding-a-workspace);
    `enso config check` lists them.
 4. A workspace without the home's shared layer (one outside the Enso home, or
    for Codex one that is its own git repository) now gets no Enso guidance at
@@ -305,7 +307,8 @@ First public release of Enso Light, the standalone Rust Slack-to-CLI service.
 - This release does not migrate homes from the previous Python Enso project.
   Initialize a separate home when moving from that application.
 
-[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/geekforbrains/enso-light/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/geekforbrains/enso-light/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/geekforbrains/enso-light/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/geekforbrains/enso-light/releases/tag/v0.1.0
