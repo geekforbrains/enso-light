@@ -5,6 +5,8 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-08
+
 ### Upgrading from 0.1.x
 
 Enso 0.2.0 needs a rewritten `config.json`, a new home layout, and a new
@@ -50,7 +52,7 @@ database. Follow these steps in order; 0.2.0 cannot start until they are done.
    and link `CLAUDE.md` to it with `ln -s AGENTS.md CLAUDE.md`.
 
 5. Rewrite `config.json` to the
-   [new shape](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#configjson):
+   [new shape](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/configuration.md#configjson):
    - Move `execution`'s `cli`, `model`, `effort`, `executable`, and `args` to
      `providers.main`, add `"defaults": {"provider": "main"}`, and move
      `execution.timeout_seconds` to `defaults.timeout_seconds`. Set `model`
@@ -81,18 +83,18 @@ database. Follow these steps in order; 0.2.0 cannot start until they are done.
 - Named `providers` in `config.json`, each a `cli` (`claude` or `codex`) with
   optional `model`, `effort`, `executable`, and `args`. Runs use
   `defaults.provider` unless their workspace or job names another. See
-  [configuration](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#providers).
+  [configuration](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/configuration.md#providers).
 - `defaults.timeout_seconds`, overridable per job with `timeout_seconds`.
 - `${ENSO_HOME}` in `config.json` expands to the Enso home in use.
 - Named `workspaces` in `config.json`, each an absolute `path` with an optional
   `provider`. Agents run in their conversation's or job's workspace, attachments
   go to its `uploads/<run-id>/`, and `ENSO_WORKSPACE` gives agents and hooks its
   path. See
-  [workspaces](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#workspaces).
+  [workspaces](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/configuration.md#workspaces).
 - `slack.dms` and `slack.channels` route users and channels to workspaces, with
   `"*"` for any user or channel not listed. Channel `mention` modes (`always`,
   `first`, `never`) and `defaults.mention` set when a mention is needed. See
-  [Slack routing](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#slack).
+  [Slack routing](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/configuration.md#slack).
 - `!status`, the run context, and stored run settings name the provider and
   workspace. `!status` also says when the stored session belongs to another CLI
   or workspace and needs `!clear`.
@@ -100,24 +102,24 @@ database. Follow these steps in order; 0.2.0 cannot start until they are done.
   the user or channel ID to add to `slack.dms` or `slack.channels`. Customize
   the text with `slack.unconfigured_message`, or set it to `""` to stay silent.
   See
-  [unconfigured conversations](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#unconfigured-conversations).
+  [unconfigured conversations](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/configuration.md#unconfigured-conversations).
 - The Enso home is a git repository with a shared `AGENTS.md` and
   `.agents/skills/` for every workspace inside it (`CLAUDE.md` and
   `.claude/skills` link to them), and a `.gitignore` for secrets and runtime
   state. `enso init` runs `git init` and warns instead of failing when git is
   unavailable; Codex needs the repository to load the shared layer. See
-  [instructions and skills](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#instructions-and-skills).
+  [instructions and skills](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/configuration.md#instructions-and-skills).
 - `enso init` and service startup create each missing workspace directory with
   a starter `AGENTS.md`, `CLAUDE.md` link, and `.agents/skills/`. Existing
   directories are left untouched. Service startup logs a workspace it cannot
   create and keeps running. See
-  [workspace scaffolding](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#workspace-scaffolding).
+  [workspace scaffolding](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/configuration.md#workspace-scaffolding).
 
 ### Changed
 
 - **Breaking:** `config.json` replaces `execution` with `defaults` and
   `providers`, and an old file fails to load with an error instead of being
-  misread. See [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/main/CHANGELOG.md#upgrading-from-01x).
+  misread. See [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/v0.2.0/CHANGELOG.md#upgrading-from-01x).
 - **Breaking:** Slack tokens come only from `SLACK_BOT_TOKEN`,
   `SLACK_APP_TOKEN`, and optional `SLACK_USER_TOKEN` in `.env` or the
   environment, never from `config.json`. An assignment in `.env`, even an empty
@@ -131,11 +133,11 @@ database. Follow these steps in order; 0.2.0 cannot start until they are done.
   jobs instead of reporting `cli`. It exits non-zero when there are errors.
   `enso service install` refuses until they are fixed, and while `config.json`
   uses a variable that only your shell defines rather than `.env`. See
-  [checking configuration](https://github.com/geekforbrains/enso-light/blob/main/docs/cli.md#checking-configuration).
+  [checking configuration](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/cli.md#checking-configuration).
 - An invalid job no longer stops the service, the scheduler, or other jobs:
   it is skipped with a logged error, and `enso jobs list` shows it with its
   `error`. See
-  [invalid jobs](https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md#invalid-jobs).
+  [invalid jobs](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/jobs.md#invalid-jobs).
 - A `config.json` or `job.json` with an unknown or missing field names it in
   the error, such as ``unknown field `execution` ``.
 - **Breaking:** jobs require `workspace` in `job.json`, naming a configured
@@ -148,7 +150,7 @@ database. Follow these steps in order; 0.2.0 cannot start until they are done.
 - **Breaking:** Enso 0.2.0 needs a new `enso.db`; an older database fails to
   open, and the service then creates nothing in the home. `enso config check`
   reports it too. See
-  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/main/CHANGELOG.md#upgrading-from-01x).
+  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/v0.2.0/CHANGELOG.md#upgrading-from-01x).
 - **Breaking:** Claude Code runs pass `--setting-sources project,local`, so
   they no longer load your personal `~/.claude` settings, skills, plugins, or
   `CLAUDE.md`. Grant unattended permissions in provider `args` (for example
@@ -160,7 +162,7 @@ database. Follow these steps in order; 0.2.0 cannot start until they are done.
   workspace's `.claude/settings.json`.
 - **Breaking:** the home layout moves `skills/` to `.agents/skills/` and the
   starter workspace from `workspace/` to `workspaces/main/`. See
-  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/main/CHANGELOG.md#upgrading-from-01x).
+  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/v0.2.0/CHANGELOG.md#upgrading-from-01x).
 
 ### Removed
 
@@ -169,7 +171,7 @@ database. Follow these steps in order; 0.2.0 cannot start until they are done.
   routes, and `mention` modes.
 - **Breaking:** the job `execution` overrides object. Define a provider and set
   the job's `provider` and `timeout_seconds` instead; see
-  [jobs](https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md).
+  [jobs](https://github.com/geekforbrains/enso-light/blob/v0.2.0/docs/jobs.md).
 
 ## [0.1.1] - 2026-10-06
 
@@ -213,6 +215,7 @@ First public release of Enso Light, the standalone Rust Slack-to-CLI service.
 - This release does not migrate homes from the previous Python Enso project.
   Initialize a separate home when moving from that application.
 
-[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/geekforbrains/enso-light/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/geekforbrains/enso-light/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/geekforbrains/enso-light/releases/tag/v0.1.0
