@@ -2,9 +2,9 @@
 use crate::{
     config::{self, Config, Loaded},
     context,
-    db::{Db, Run},
+    db::{Db, Run, Session},
     formatting, jobs, runner,
-    slack::{Incoming, Slack},
+    slack::{Admission, Incoming, Slack},
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Local, Utc};
@@ -128,7 +128,7 @@ pub async fn run(home: PathBuf) -> Result<()> {
             for(id,token)in &running{if db.cancelled(id)?{token.cancel();}}
             let now=Local::now();let key=now.format("%Y-%m-%dT%H:%M").to_string();
             if key!=minute {minute=key.clone();match jobs::list(&home,config){Ok(jobs)=>for job in jobs {if job.enabled && let Some(cron)=&job.cron && jobs::due(cron,now)?{db.enqueue_job(&job.name,"cron",Some(&key))?;}},Err(error)=>eprintln!("Job schedule: {error:#}")}}
-            dispatch_ready(&db, |work| {let token=cancel.child_token();running.insert(work.id.clone(),token.clone());let (home,db,slack,loaded)=(home.clone(),db.clone(),slack.clone(),loaded.clone());tasks.spawn(async move{let id=work.id.clone();if let Err(error)=execute(&home,&db,&slack,&loaded,&work,token).await{let error=redact(&format!("{error:#}"),&loaded);eprintln!("Run {id}: {error}");let _=db.finish(&id,"failed","",Some(&error),None,"");}id});})?;
+            dispatch_ready(&db, |work| {let token=cancel.child_token();running.insert(work.id.clone(),token.clone());let (home,db,slack,loaded)=(home.clone(),db.clone(),slack.clone(),loaded.clone());tasks.spawn(async move{let id=work.id.clone();if let Err(error)=execute(&home,&db,&slack,&loaded,&work,token).await{let error=redact(&format!("{error:#}"),&loaded);eprintln!("Run {id}: {error}");let _=db.finish(&id,"failed","",Some(&error),None);}id});})?;
         }
       }}Ok(())
     }.await;
@@ -241,8 +241,9 @@ fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Va
         .or(event["ts"].as_str())
         .unwrap_or("");
     let participated = db.participated(channel, thread)?;
-    let Some(input) = slack.normalize(payload, bot, participated)? else {
-        return Ok(());
+    let input = match slack.normalize(payload, bot, config.defaults.mention, participated)? {
+        Admission::Accept(input) => input,
+        Admission::Unconfigured { .. } | Admission::Ignore => return Ok(()),
     };
     let command = input.text.trim();
     let is_command = matches!(command, "!clear" | "!stop" | "!status" | "!help");
@@ -253,7 +254,7 @@ fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Va
         Some(match command{
         "!clear"=>match db.clear(&accepted.conversation_id){Ok(())=>"Conversation cleared. Your next message starts a fresh session.".into(),Err(e)=>e.to_string()},
         "!stop"=>{db.stop(&accepted.conversation_id)?;"Stopped active and queued work in this conversation.".into()},
-        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;let(name,provider)=config.provider(None)?;format!("Enso: {name} ({} / {} / {})\nRunning: {} · queued: {}\nSession: {}",provider.cli,provider.model.as_deref().unwrap_or("native default"),provider.effort.as_deref().unwrap_or("native default"),state["running"],state["queued"],if state["has_session"]==true{"active"}else{"not started"})},
+        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;let workspace=config.workspace(&input.workspace)?;let(name,provider)=config.provider(workspace.provider.as_deref())?;format!("Enso: {name} ({} / {} / {})\nWorkspace: {}\nRunning: {} · queued: {}\nSession: {}",provider.cli,provider.model.as_deref().unwrap_or("native default"),provider.effort.as_deref().unwrap_or("native default"),input.workspace,state["running"],state["queued"],if state["has_session"]==true{"active"}else{"not started"})},
         _=>"!clear — start a fresh session when idle\n!stop — cancel active and queued work\n!status — show session and queue\n!help — show these commands".into()
     })
     } else if accepted.busy {
@@ -303,7 +304,7 @@ async fn execute(
         cancel.clone(),
     )
     .await;
-    let (mut state, text, error, session, provider) = match outcome {
+    let (mut state, text, error, session) = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
             let message = redact(&format!("{error:#}"), loaded);
@@ -314,26 +315,13 @@ async fn execute(
             } else {
                 "failed"
             };
-            (
-                state.to_owned(),
-                String::new(),
-                Some(message),
-                None,
-                String::new(),
-            )
+            (state.to_owned(), String::new(), Some(message), None)
         }
     };
     if cancel.is_cancelled() || db.cancelled(&work.id)? {
         state = "cancelled".into();
     }
-    db.finish(
-        &work.id,
-        &state,
-        &text,
-        error.as_deref(),
-        session.as_deref(),
-        &provider,
-    )?;
+    db.finish(&work.id, &state, &text, error.as_deref(), session.as_ref())?;
     if let Some(input) = &incoming {
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
@@ -370,7 +358,7 @@ async fn execute(
     }
     Ok(())
 }
-type Completion = (String, String, Option<String>, Option<String>, String);
+type Completion = (String, String, Option<String>, Option<Session>);
 async fn execute_inner(
     home: &Path,
     db: &Db,
@@ -386,23 +374,50 @@ async fn execute_inner(
         .as_ref()
         .map(|name| jobs::load(home, name, config))
         .transpose()?;
-    let (provider, settings) = config.provider(job.as_ref().and_then(|j| j.provider.as_deref()))?;
+    let workspace_name = job
+        .as_ref()
+        .map(|j| j.workspace.clone())
+        .or(incoming.map(|i| i.workspace.clone()))
+        .context("run has no workspace")?;
+    let workspace_config = config.workspace(&workspace_name)?;
+    let (provider, settings) = config.provider(
+        job.as_ref()
+            .and_then(|j| j.provider.as_deref())
+            .or(workspace_config.provider.as_deref()),
+    )?;
     let (provider, settings) = (provider.to_owned(), settings.clone());
+    let workspace = workspace_config.path.clone();
+    let workspace_path = workspace.to_string_lossy().into_owned();
     let timeout_seconds = job
         .as_ref()
         .and_then(|j| j.timeout_seconds)
         .unwrap_or(config.defaults.timeout_seconds);
     if work.session.is_some() {
         ensure!(
-            work.provider.as_deref() == Some(settings.cli.as_str()),
+            work.cli.as_deref() == Some(settings.cli.as_str()),
             "Configured CLI changed. Use !clear before starting a session with {}.",
             settings.cli
         );
+        ensure!(
+            work.workspace.as_deref() == Some(workspace_path.as_str()),
+            "This conversation's workspace changed. Use !clear to start a fresh session in {workspace_name}."
+        );
     }
-    let workspace = home.join("workspace");
+    ensure!(
+        workspace.is_dir(),
+        "workspace {workspace_name} directory does not exist: {workspace_path}"
+    );
+    let pin = |session: Option<String>| {
+        session.map(|id| Session {
+            id,
+            cli: settings.cli.clone(),
+            workspace: workspace_path.clone(),
+        })
+    };
     let mut env = base_env.clone();
     for name in [
         "ENSO_HOME",
+        "ENSO_WORKSPACE",
         "ENSO_RUN_ID",
         "ENSO_SOURCE",
         "ENSO_JOB",
@@ -412,6 +427,7 @@ async fn execute_inner(
         env.insert(name.into(), String::new());
     }
     env.insert("ENSO_HOME".into(), home.to_string_lossy().into());
+    env.insert("ENSO_WORKSPACE".into(), workspace_path.clone());
     env.insert("ENSO_RUN_ID".into(), work.id.clone());
     env.insert(
         "ENSO_SOURCE".into(),
@@ -434,7 +450,7 @@ async fn execute_inner(
             dest.thread.clone().unwrap_or_default(),
         );
     }
-    let mut header = json!({"source":if incoming.is_some(){"slack"}else{"job"},"run_id":work.id,"provider":provider,"workspace":workspace,"received_at":time(work.created_at),"started_at":Local::now().to_rfc3339()});
+    let mut header = json!({"source":if incoming.is_some(){"slack"}else{"job"},"run_id":work.id,"provider":provider,"workspace":{"name":workspace_name,"path":workspace_path},"received_at":time(work.created_at),"started_at":Local::now().to_rfc3339()});
     let background = if let Some(conv) = &work.conversation {
         db.background(conv)?
     } else {
@@ -508,7 +524,6 @@ async fn execute_inner(
                         .unwrap_or_else(|| "Prerun skipped this job".into()),
                     None,
                     None,
-                    settings.cli,
                 ));
             }
             variables = pre.vars;
@@ -526,6 +541,7 @@ async fn execute_inner(
     let mut snapshot = serde_json::to_value(&settings)?;
     snapshot["provider"] = json!(provider);
     snapshot["timeout_seconds"] = json!(timeout_seconds);
+    snapshot["workspace"] = json!({"name":workspace_name,"path":workspace_path});
     db.snapshot(&work.id, &prompt, &header, &snapshot)?;
     let max_attempts = job.as_ref().map_or(0, |job| job.retries) + 1;
     let mut session = work.session.clone();
@@ -564,7 +580,7 @@ async fn execute_inner(
             .as_ref()
             .filter(|job| job.postrun && !cancel.is_cancelled())
         else {
-            return Ok((state, text, error, session, settings.cli));
+            return Ok((state, text, error, pin(session)));
         };
         let mut input = header.clone();
         input["variables"] = json!(variables);
@@ -598,14 +614,14 @@ async fn execute_inner(
             db.record_attempts(&work.id, &attempts)?;
         }
         let Some(message) = retry else {
-            return Ok((state, text, error, session, settings.cli));
+            return Ok((state, text, error, pin(session)));
         };
         if attempt == max_attempts {
             error = Some(format!(
                 "postrun requested a retry with no retries left (retries: {}): {message}",
                 max_attempts - 1
             ));
-            return Ok(("failed".into(), text, error, session, settings.cli));
+            return Ok(("failed".into(), text, error, pin(session)));
         }
         attempt += 1;
         let note = format!(

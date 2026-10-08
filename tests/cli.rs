@@ -44,7 +44,13 @@ fn configured_home() -> tempfile::TempDir {
     .unwrap();
     fs::write(
         directory.path().join("config.json"),
-        json!({"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}}}).to_string(),
+        json!({
+            "defaults":{"provider":"main"},
+            "providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}},
+            "workspaces":{"main":{"path":"${ENSO_HOME}/workspace"}},
+            "slack":{"dms":{"U012345":"main"}}
+        })
+        .to_string(),
     )
     .unwrap();
     directory
@@ -178,7 +184,11 @@ fn init_creates_guidance_and_database_without_overwriting_local_content() {
 #[test]
 fn config_check_validates_jobs_locally_without_exposing_credentials() {
     let directory = configured_home();
-    add_job(directory.path(), "report", json!({"cron":"0 9 * * *"}));
+    add_job(
+        directory.path(),
+        "report",
+        json!({"workspace":"main","cron":"0 9 * * *"}),
+    );
     let valid = successful(enso(directory.path(), &["config", "check"]));
     assert_eq!(valid["valid"], true);
     assert_eq!(valid["jobs"], 1);
@@ -206,13 +216,29 @@ fn config_check_requires_a_provider_cli_known_job_providers_and_env_tokens() {
     );
 
     let directory = configured_home();
-    add_job(directory.path(), "report", json!({"provider":"opus"}));
+    add_job(
+        directory.path(),
+        "report",
+        json!({"workspace":"main","provider":"opus"}),
+    );
     let valid = successful(enso(directory.path(), &["config", "check"]));
     assert_eq!(valid["provider"], "main");
-    add_job(directory.path(), "report", json!({"provider":"missing"}));
-    let error = String::from_utf8(enso(directory.path(), &["config", "check"]).stderr).unwrap();
-    assert!(error.contains("job report: invalid provider"), "{error}");
-    add_job(directory.path(), "report", json!({}));
+    for (definition, message) in [
+        (
+            json!({"workspace":"main","provider":"missing"}),
+            "job report: invalid provider",
+        ),
+        (json!({}), "missing field `workspace`"),
+        (
+            json!({"workspace":"other"}),
+            r#"workspace \"other\" is not defined in workspaces"#,
+        ),
+    ] {
+        add_job(directory.path(), "report", definition);
+        let error = String::from_utf8(enso(directory.path(), &["config", "check"]).stderr).unwrap();
+        assert!(error.contains(message), "{error}");
+    }
+    add_job(directory.path(), "report", json!({"workspace":"main"}));
     fs::write(
         directory.path().join(".env"),
         "SLACK_APP_TOKEN=fake-app-token\n",
@@ -238,8 +264,16 @@ fn config_check_requires_a_provider_cli_known_job_providers_and_env_tokens() {
 #[test]
 fn jobs_list_reports_definitions_and_trigger_requires_a_running_service() {
     let directory = configured_home();
-    add_job(directory.path(), "report", json!({"cron":"0 9 * * *"}));
-    add_job(directory.path(), "manual", json!({"enabled":false}));
+    add_job(
+        directory.path(),
+        "report",
+        json!({"workspace":"main","cron":"0 9 * * *"}),
+    );
+    add_job(
+        directory.path(),
+        "manual",
+        json!({"workspace":"main","enabled":false}),
+    );
     let list = successful(enso(directory.path(), &["jobs", "list"]));
     assert_eq!(list.as_array().unwrap().len(), 2);
     assert_eq!(list[0]["name"], "manual");
@@ -275,7 +309,7 @@ fn jobs_list_reports_definitions_and_trigger_requires_a_running_service() {
 #[test]
 fn a_run_can_wait_for_another_jobs_result() {
     let directory = configured_home();
-    add_job(directory.path(), "child", json!({}));
+    add_job(directory.path(), "child", json!({"workspace":"main"}));
     let _lock = app::lock(directory.path()).unwrap();
     let db = Db::open(directory.path()).unwrap();
     let parent = db.enqueue_job("parent", "manual", None).unwrap().unwrap();
@@ -295,15 +329,8 @@ fn a_run_can_wait_for_another_jobs_result() {
     loop {
         if let Some(work) = db.claim().unwrap() {
             assert_eq!(work.job.as_deref(), Some("child"));
-            db.finish(
-                &work.id,
-                "succeeded",
-                "Child finished",
-                None,
-                None,
-                "claude",
-            )
-            .unwrap();
+            db.finish(&work.id, "succeeded", "Child finished", None, None)
+                .unwrap();
             child = Some(work.id);
         }
         if command.try_wait().unwrap().is_some() {
@@ -339,6 +366,38 @@ fn invalid_existing_configuration_is_not_reseeded_by_init() {
     );
     assert!(!directory.path().join("workspace").exists());
     assert!(!directory.path().join("enso.db").exists());
+}
+
+#[test]
+fn config_check_rejects_old_routing_keys_and_unknown_workspace_routes() {
+    let directory = configured_home();
+    let path = directory.path().join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for (slack, message) in [
+        (
+            json!({"dm_users":["U012345"]}),
+            "invalid config.json fields",
+        ),
+        (
+            json!({"channels":{"C012345":{"top_level":true,"thread":false}}}),
+            "invalid config.json fields",
+        ),
+        (
+            json!({"channels":{"C012345":"other"}}),
+            "slack.channels.C012345 names workspace",
+        ),
+        (
+            json!({"channels":{"C012345":{"workspace":"main","mention":"first"}},"dms":{"*":"main"}}),
+            "",
+        ),
+    ] {
+        config["slack"] = slack;
+        fs::write(&path, config.to_string()).unwrap();
+        let output = enso(directory.path(), &["config", "check"]);
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.success(), message.is_empty(), "{error}");
+        assert!(error.contains(message), "{error}");
+    }
 }
 
 #[test]

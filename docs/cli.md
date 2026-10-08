@@ -90,9 +90,10 @@ sortable tables (`data_table`), or layouts Markdown cannot express. The message
 text is required as its notification fallback. Blocks are not escaped, and Enso
 does not handle interactive callbacks such as button clicks.
 
-Incoming attachments are downloaded into `workspace/uploads/<run-id>/` with safe
-filenames. The current prompt includes their paths. An incoming message supports
-up to 20 files; individual incoming or outgoing files are limited to 50 MiB.
+Incoming attachments are downloaded into `uploads/<run-id>/` inside the run's
+workspace with safe filenames. The current prompt includes their paths. An
+incoming message supports up to 20 files; individual incoming or outgoing files
+are limited to 50 MiB.
 A failed download reports an error before starting the agent.
 
 ## Slack lookup and reactions
@@ -100,7 +101,7 @@ A failed download reports an error before starting the agent.
 `enso slack` commands call the Web API directly using the Slack tokens from
 `.env` or the environment. They
 work without a running Enso service or a Socket Mode connection and always return
-JSON; global `--json` makes it compact. Incoming-message allowlists do not limit
+JSON; global `--json` makes it compact. Incoming-message routes do not limit
 these calls: the token's Slack permissions and conversation access determine
 what is available. Sending text and attachments still uses `enso message send`.
 
@@ -159,8 +160,18 @@ enso slack react C012345 '1791295200.000100' eyes
 |---|---|
 | `!clear` | Clear an idle conversation's native session for the next turn |
 | `!stop` | Cancel its running turn and queued turns |
-| `!status` | Show the default provider (CLI, model, effort) and running/queued state |
+| `!status` | Show the conversation's provider (CLI, model, effort), workspace, running/queued counts, and session state |
 | `!help` | Show the controls |
+
+```text
+Enso: opus (claude / opus / high)
+Workspace: acme
+Running: 0 · queued: 0
+Session: active
+```
+
+`!status` shows `native default` for an unset model or effort. `!clear` also
+unpins the session's CLI and workspace.
 
 Enso adds a working reaction while a turn runs, acknowledges queued turns, and
 reports failures and timeouts. Thread participation survives `!clear`.

@@ -1,5 +1,6 @@
 //! Slack admission, Socket Mode, and Web API. Secrets never enter diagnostics.
 use std::{
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -12,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
-use crate::config::{Destination, SlackConfig, Tokens};
+use crate::config::{Destination, Mention, SlackConfig, Tokens};
 
 const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_FILES: usize = 20;
@@ -66,6 +67,21 @@ pub struct Incoming {
     pub conversation_thread: Option<String>,
     pub reply: Destination,
     pub files: Vec<RemoteFile>,
+    /// The configured workspace name this message routes to.
+    pub workspace: String,
+}
+
+/// How an incoming Slack event is handled after routing.
+#[derive(Debug)]
+pub enum Admission {
+    Accept(Box<Incoming>),
+    /// No route matches; `id` belongs in config `setting` to enable it.
+    Unconfigured {
+        reply: Destination,
+        id: String,
+        setting: &'static str,
+    },
+    Ignore,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -248,59 +264,40 @@ impl Slack {
 
     /// The caller looks up thread participation in SQLite before admission.
     /// DMs share one conversation but replies follow the incoming DM thread.
+    /// An exact user or channel ID wins over `*`; `mention` is `defaults.mention`.
     pub fn normalize(
         &self,
         payload: &Value,
         bot_user_id: &str,
+        mention: Mention,
         participated: bool,
-    ) -> Result<Option<Incoming>> {
+    ) -> Result<Admission> {
         let event = payload.get("event").unwrap_or(payload);
         if !matches!(event["type"].as_str(), Some("message" | "app_mention"))
             || event.get("bot_id").is_some()
             || event["user"].as_str() == Some(bot_user_id)
             || event["hidden"] == true
         {
-            return Ok(None);
+            return Ok(Admission::Ignore);
         }
         if let Some(subtype) = event["subtype"].as_str()
             && !matches!(subtype, "file_share" | "thread_broadcast" | "me_message")
         {
-            return Ok(None);
+            return Ok(Admission::Ignore);
         }
         let (Some(user), Some(channel), Some(ts)) = (
             event["user"].as_str(),
             event["channel"].as_str(),
             event["ts"].as_str(),
         ) else {
-            return Ok(None);
+            return Ok(Admission::Ignore);
         };
         let dm = event["channel_type"] == "im" || channel.starts_with('D');
-        if dm && !self.config.dm_users.iter().any(|id| id == user) {
-            return Ok(None);
-        }
-        let rules = if dm {
-            &self.config.mentions
-        } else {
-            let Some(rules) = self.config.channels.get(channel) else {
-                return Ok(None);
-            };
-            rules
-        };
         let original = event["text"].as_str().unwrap_or("");
-        let mention = format!("<@{bot_user_id}>");
-        let mentioned = original.contains(&mention);
+        let tag = format!("<@{bot_user_id}>");
+        let mentioned = original.contains(&tag);
         let thread = event["thread_ts"].as_str().filter(|thread| *thread != ts);
-        if !dm
-            && !mentioned
-            && if thread.is_some() {
-                rules.thread || !participated
-            } else {
-                rules.top_level
-            }
-        {
-            return Ok(None);
-        }
-        let text = original.replace(&mention, "").trim().to_owned();
+        let text = original.replace(&tag, "").trim().to_owned();
         let files: Vec<_> = event["files"]
             .as_array()
             .into_iter()
@@ -310,10 +307,55 @@ impl Slack {
         // Admit and acknowledge the event before reporting attachment limits.
         // download() rejects it as a failed run instead of reconnecting forever.
         if text.is_empty() && files.is_empty() {
-            return Ok(None);
+            return Ok(Admission::Ignore);
         }
-        let conversation_thread = (!dm).then(|| thread.unwrap_or(ts).to_owned());
-        Ok(Some(Incoming {
+        let reply = Destination {
+            channel: channel.into(),
+            thread: if dm {
+                thread.map(str::to_owned)
+            } else {
+                Some(thread.unwrap_or(ts).into())
+            },
+        };
+        let workspace = if dm {
+            let Some(workspace) = self.config.dms.get(user).or(self.config.dms.get("*")) else {
+                return Ok(Admission::Unconfigured {
+                    reply,
+                    id: user.into(),
+                    setting: "slack.dms",
+                });
+            };
+            workspace.clone()
+        } else {
+            let channels = &self.config.channels;
+            let Some(route) = channels.get(channel).or(channels.get("*")) else {
+                return Ok(if mentioned {
+                    Admission::Unconfigured {
+                        reply,
+                        id: channel.into(),
+                        setting: "slack.channels",
+                    }
+                } else {
+                    Admission::Ignore
+                });
+            };
+            let (top_level, in_thread) = match route.mention().unwrap_or(mention) {
+                Mention::Always => (true, true),
+                Mention::First => (true, false),
+                Mention::Never => (false, false),
+            };
+            if !mentioned
+                && if thread.is_some() {
+                    in_thread || !participated
+                } else {
+                    top_level
+                }
+            {
+                return Ok(Admission::Ignore);
+            }
+            route.workspace().to_owned()
+        };
+        Ok(Admission::Accept(Box::new(Incoming {
             event_id: payload["event_id"].as_str().unwrap_or(ts).to_owned(),
             channel: channel.into(),
             channel_kind: if dm {
@@ -330,17 +372,11 @@ impl Slack {
             text,
             message_ts: ts.into(),
             thread_ts: thread.map(str::to_owned),
-            conversation_thread,
-            reply: Destination {
-                channel: channel.into(),
-                thread: if dm {
-                    thread.map(str::to_owned)
-                } else {
-                    Some(thread.unwrap_or(ts).into())
-                },
-            },
+            conversation_thread: (!dm).then(|| thread.unwrap_or(ts).to_owned()),
+            reply,
             files,
-        }))
+            workspace,
+        })))
     }
 
     /// Payloads can carry a persisted UUID client_msg_id supplied by the outbox.
@@ -410,7 +446,11 @@ impl Slack {
             files.len() <= MAX_FILES,
             "A Slack message may have at most {MAX_FILES} attachments"
         );
-        tokio::fs::create_dir_all(directory)
+        // Workspaces can be outside repositories; only create uploads when needed.
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        private_directory(directory)
             .await
             .context("Cannot create attachment directory")?;
         let mut attachments = Vec::new();
@@ -448,10 +488,7 @@ impl Slack {
             let safe_name = safe_filename(&file.name);
             let path = directory.join(format!("{index:02}-{safe_name}"));
             // Exclusive creation rejects collisions and symlink replacement.
-            let mut output = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
+            let mut output = private_file(&path)
                 .await
                 .context("Cannot create attachment file")?;
             let result: Result<()> = async {
@@ -694,6 +731,24 @@ fn slack_host(url: &url::Url) -> bool {
         .is_some_and(|host| host == "slack.com" || host.ends_with(".slack.com"))
 }
 
+async fn private_directory(directory: &Path) -> std::io::Result<()> {
+    tokio::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .await?;
+    tokio::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).await
+}
+
+async fn private_file(path: &Path) -> std::io::Result<tokio::fs::File> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .await
+}
+
 fn validate_file_url(address: &str) -> Result<()> {
     let url = url::Url::parse(address).map_err(|_| anyhow!("Invalid Slack attachment URL"))?;
     ensure!(
@@ -765,15 +820,15 @@ impl Socket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Mentions;
+    use crate::config::{ChannelRoute, ChannelSettings};
     use tokio::io::AsyncReadExt;
 
     fn slack() -> Slack {
-        let mut config = SlackConfig {
-            dm_users: vec!["U1".into()],
-            ..SlackConfig::default()
-        };
-        config.channels.insert("C1".into(), Mentions::default());
+        let mut config = SlackConfig::default();
+        config.dms.insert("U1".into(), "main".into());
+        config
+            .channels
+            .insert("C1".into(), ChannelRoute::Workspace("acme".into()));
         Slack::new(&config, &Tokens::default()).unwrap()
     }
 
@@ -783,6 +838,28 @@ mod tests {
             value["event"]["thread_ts"] = json!(thread);
         }
         value
+    }
+
+    impl Slack {
+        fn admit(&self, payload: &Value, participated: bool) -> Option<Incoming> {
+            match self
+                .normalize(payload, "UBOT", Mention::Always, participated)
+                .unwrap()
+            {
+                Admission::Accept(incoming) => Some(*incoming),
+                _ => None,
+            }
+        }
+    }
+
+    fn route(slack: &mut Slack, channel: &str, workspace: &str, mention: Option<Mention>) {
+        slack.config.channels.insert(
+            channel.into(),
+            ChannelRoute::Settings(ChannelSettings {
+                workspace: workspace.into(),
+                mention,
+            }),
+        );
     }
 
     #[test]
@@ -800,7 +877,7 @@ mod tests {
         let slack = slack();
         let mut payload = message("D1", "files", None);
         payload["event"]["files"] = json!(vec![json!({"id":"F1","name":"file"}); MAX_FILES + 1]);
-        let incoming = slack.normalize(&payload, "UBOT", false).unwrap().unwrap();
+        let incoming = slack.admit(&payload, false).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let error = slack
             .download(&incoming.files, &temp.path().join("uploads"))
@@ -814,85 +891,130 @@ mod tests {
     fn dm_uses_one_session_and_preserves_reply_thread() {
         let slack = slack();
         for thread in [None, Some("122.001")] {
-            let result = slack
-                .normalize(&message("D1", "hello", thread), "UBOT", false)
-                .unwrap()
-                .unwrap();
+            let result = slack.admit(&message("D1", "hello", thread), false).unwrap();
             assert_eq!(result.conversation_thread, None);
             assert_eq!(result.reply.thread.as_deref(), thread);
             assert_eq!(result.channel_kind, "im");
+            assert_eq!(result.workspace, "main");
         }
-        let mut other_user = message("D1", "hello", None);
-        other_user["event"]["user"] = json!("U2");
-        assert!(
-            slack
-                .normalize(&other_user, "UBOT", false)
+    }
+
+    #[test]
+    fn unlisted_dm_users_are_unconfigured_unless_a_wildcard_routes_them() {
+        let mut slack = slack();
+        for thread in [None, Some("122.001")] {
+            let mut other = message("D1", "hello", thread);
+            other["event"]["user"] = json!("U2");
+            match slack
+                .normalize(&other, "UBOT", Mention::Always, false)
                 .unwrap()
-                .is_none()
+            {
+                Admission::Unconfigured { reply, id, setting } => {
+                    assert_eq!(reply.channel, "D1");
+                    assert_eq!(reply.thread.as_deref(), thread);
+                    assert_eq!(id, "U2");
+                    assert_eq!(setting, "slack.dms");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        slack.config.dms.insert("*".into(), "acme".into());
+        let mut other = message("D1", "hello", None);
+        other["event"]["user"] = json!("U2");
+        assert_eq!(slack.admit(&other, false).unwrap().workspace, "acme");
+        assert_eq!(
+            slack
+                .admit(&message("D1", "hello", None), false)
+                .unwrap()
+                .workspace,
+            "main"
         );
     }
 
     #[test]
-    fn channels_need_permission_and_independent_mention_rules() {
+    fn unlisted_channels_reply_only_when_mentioned() {
         let mut slack = slack();
-        assert!(
+        let normalize = |slack: &Slack, payload: &Value| {
             slack
-                .normalize(&message("C2", "<@UBOT> hello", None), "UBOT", false)
+                .normalize(payload, "UBOT", Mention::Always, false)
                 .unwrap()
-                .is_none()
-        );
-        assert!(
+        };
+        for (thread, expected) in [(None, "123.002"), (Some("122.001"), "122.001")] {
+            match normalize(&slack, &message("C2", "<@UBOT> hello", thread)) {
+                Admission::Unconfigured { reply, id, setting } => {
+                    assert_eq!(reply.channel, "C2");
+                    assert_eq!(reply.thread.as_deref(), Some(expected));
+                    assert_eq!(id, "C2");
+                    assert_eq!(setting, "slack.channels");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(matches!(
+                normalize(&slack, &message("C2", "hello", thread)),
+                Admission::Ignore
+            ));
+        }
+        assert!(matches!(
+            normalize(&slack, &message("C2", "<@UBOT>", None)),
+            Admission::Ignore
+        ));
+        route(&mut slack, "*", "main", Some(Mention::Never));
+        assert_eq!(
             slack
-                .normalize(&message("C1", "hello", None), "UBOT", false)
+                .admit(&message("C2", "hello", None), false)
                 .unwrap()
-                .is_none()
+                .workspace,
+            "main"
         );
+        // The exact channel keeps its own workspace and mention mode.
+        assert!(slack.admit(&message("C1", "hello", None), false).is_none());
+        let exact = slack
+            .admit(&message("C1", "<@UBOT> hi", None), false)
+            .unwrap();
+        assert_eq!(exact.workspace, "acme");
+    }
+
+    #[test]
+    fn channel_mention_modes_follow_thread_participation() {
+        let mut slack = slack();
+        let top = message("C1", "hello", None);
+        let reply = message("C1", "hello", Some("122.001"));
+        let mentioned = message("C1", "<@UBOT> hello", Some("122.001"));
         let incoming = slack
-            .normalize(&message("C1", "<@UBOT> hello", None), "UBOT", false)
-            .unwrap()
+            .admit(&message("C1", "<@UBOT> hello", None), false)
             .unwrap();
         assert_eq!(incoming.text, "hello");
         assert_eq!(incoming.conversation_thread.as_deref(), Some("123.002"));
         assert_eq!(incoming.reply.thread.as_deref(), Some("123.002"));
-        slack.config.channels.insert(
-            "C1".into(),
-            Mentions {
-                top_level: false,
-                thread: true,
-            },
-        );
-        assert!(
+        assert_eq!(incoming.workspace, "acme");
+        // (mode, top level, unjoined thread, joined thread)
+        for (mode, top_level, unjoined, joined) in [
+            (Mention::Always, false, false, false),
+            (Mention::First, false, false, true),
+            (Mention::Never, true, false, true),
+        ] {
+            route(&mut slack, "C1", "acme", Some(mode));
+            assert_eq!(slack.admit(&top, false).is_some(), top_level, "{mode:?}");
+            assert_eq!(slack.admit(&reply, false).is_some(), unjoined, "{mode:?}");
+            assert_eq!(slack.admit(&reply, true).is_some(), joined, "{mode:?}");
+            assert!(slack.admit(&mentioned, false).is_some(), "{mode:?}");
+        }
+        // A channel without its own mode inherits defaults.mention.
+        route(&mut slack, "C1", "acme", None);
+        let inherit = |mode| {
+            matches!(
+                slack.normalize(&top, "UBOT", mode, false).unwrap(),
+                Admission::Accept(_)
+            )
+        };
+        assert!(!inherit(Mention::Always) && !inherit(Mention::First) && inherit(Mention::Never));
+        route(&mut slack, "C1", "acme", Some(Mention::Always));
+        assert!(matches!(
             slack
-                .normalize(&message("C1", "hello", None), "UBOT", false)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            slack
-                .normalize(&message("C1", "hello", Some("122.001")), "UBOT", true)
-                .unwrap()
-                .is_none()
-        );
-        slack.config.channels.insert(
-            "C1".into(),
-            Mentions {
-                top_level: true,
-                thread: false,
-            },
-        );
-        let followup = message("C1", "hello", Some("122.001"));
-        assert!(slack.normalize(&followup, "UBOT", false).unwrap().is_none());
-        assert!(slack.normalize(&followup, "UBOT", true).unwrap().is_some());
-        assert!(
-            slack
-                .normalize(
-                    &message("C1", "<@UBOT> hello", Some("122.001")),
-                    "UBOT",
-                    false
-                )
-                .unwrap()
-                .is_some()
-        );
+                .normalize(&top, "UBOT", Mention::Never, false)
+                .unwrap(),
+            Admission::Ignore
+        ));
     }
 
     #[test]
@@ -900,14 +1022,19 @@ mod tests {
         let slack = slack();
         let mut input = message("D1", "hello", None);
         input["event"]["subtype"] = json!("message_changed");
-        assert!(slack.normalize(&input, "UBOT", false).unwrap().is_none());
+        assert!(slack.admit(&input, false).is_none());
         input["event"]["subtype"] = json!("file_share");
         input["event"]["text"] = json!("");
         input["event"]["files"] = json!([{"id":"F1","name":"document.pdf","mimetype":"application/pdf","url_private":"https://files.slack.com/private"}]);
-        let incoming = slack.normalize(&input, "UBOT", false).unwrap().unwrap();
+        let incoming = slack.admit(&input, false).unwrap();
         assert_eq!(incoming.files.len(), 1);
         input["event"]["bot_id"] = json!("B1");
-        assert!(slack.normalize(&input, "UBOT", false).unwrap().is_none());
+        assert!(matches!(
+            slack
+                .normalize(&input, "UBOT", Mention::Always, false)
+                .unwrap(),
+            Admission::Ignore
+        ));
     }
 
     #[test]
@@ -1184,6 +1311,23 @@ mod tests {
         assert!(error.contains("outside Slack"));
         assert!(server.await.unwrap()[0].starts_with("GET /files.info?file=F1 "));
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_directories_and_files_are_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("acme");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = workspace.join("uploads").join("run");
+        private_directory(&directory).await.unwrap();
+        let file = directory.join("00-report.pdf");
+        drop(private_file(&file).await.unwrap());
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&workspace.join("uploads")), 0o700);
+        assert_eq!(mode(&directory), 0o700);
+        assert_eq!(mode(&file), 0o600);
+        assert!(private_file(&file).await.is_err());
     }
 
     #[tokio::test]

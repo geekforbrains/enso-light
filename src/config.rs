@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A named agent CLI setup; blank optional fields use the CLI's native default.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,8 +49,32 @@ impl Provider {
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
     pub provider: String,
+    #[serde(default)]
+    pub mention: Mention,
     #[serde(default = "timeout_seconds")]
     pub timeout_seconds: u64,
+}
+
+/// When channel messages must @mention the bot; DMs never need mentions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mention {
+    /// At top level and in threads.
+    #[default]
+    Always,
+    /// At top level; replies in a thread the bot joined need none.
+    First,
+    /// Never at top level; thread replies need one until the bot joins.
+    Never,
+}
+
+/// A named working directory, optionally with its own provider.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workspace {
+    pub path: PathBuf,
+    #[serde(default, deserialize_with = "optional")]
+    pub provider: Option<String>,
 }
 
 fn timeout_seconds() -> u64 {
@@ -95,18 +119,34 @@ impl Destination {
     }
 }
 
+/// A channel's workspace name, or its workspace and mention mode.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Mentions {
-    pub top_level: bool,
-    pub thread: bool,
+#[serde(untagged)]
+pub enum ChannelRoute {
+    Workspace(String),
+    Settings(ChannelSettings),
 }
 
-impl Default for Mentions {
-    fn default() -> Self {
-        Self {
-            top_level: true,
-            thread: true,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelSettings {
+    pub workspace: String,
+    #[serde(default)]
+    pub mention: Option<Mention>,
+}
+
+impl ChannelRoute {
+    pub fn workspace(&self) -> &str {
+        match self {
+            Self::Workspace(name) => name,
+            Self::Settings(settings) => &settings.workspace,
+        }
+    }
+
+    pub fn mention(&self) -> Option<Mention> {
+        match self {
+            Self::Workspace(_) => None,
+            Self::Settings(settings) => settings.mention,
         }
     }
 }
@@ -114,9 +154,10 @@ impl Default for Mentions {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
-    pub dm_users: Vec<String>,
-    pub channels: BTreeMap<String, Mentions>,
-    pub mentions: Mentions,
+    /// Slack user ID or `*` to workspace name.
+    pub dms: BTreeMap<String, String>,
+    /// Channel ID or `*` to route.
+    pub channels: BTreeMap<String, ChannelRoute>,
     pub working_reaction: String,
     pub queued_message: String,
     pub timeout_message: String,
@@ -125,9 +166,8 @@ pub struct SlackConfig {
 impl Default for SlackConfig {
     fn default() -> Self {
         Self {
-            dm_users: Vec::new(),
+            dms: BTreeMap::new(),
             channels: BTreeMap::new(),
-            mentions: Mentions::default(),
             working_reaction: "thinking_face".into(),
             queued_message: "Queued — I’ll get to this after the current turn.".into(),
             timeout_message: "This turn timed out. You can send another message to continue."
@@ -136,12 +176,32 @@ impl Default for SlackConfig {
     }
 }
 
+/// `*` or an ID made of one of `prefixes` and uppercase letters or digits.
+fn route_key(key: &str, prefixes: &[u8]) -> bool {
+    key == "*"
+        || key.len() > 1
+            && prefixes.contains(&key.as_bytes()[0])
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Letters, digits, hyphens, and underscores, as for job names.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub defaults: Defaults,
     #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
+    #[serde(default)]
+    pub workspaces: BTreeMap<String, Workspace>,
     #[serde(default)]
     pub slack: SlackConfig,
 }
@@ -168,10 +228,46 @@ impl Config {
             self.defaults.timeout_seconds > 0,
             "defaults.timeout_seconds must be greater than zero"
         );
-        if self.slack.dm_users.iter().any(String::is_empty)
-            || self.slack.channels.keys().any(String::is_empty)
-        {
-            bail!("Slack user and channel IDs must not be empty");
+        ensure!(
+            !self.workspaces.is_empty(),
+            "workspaces must define at least one workspace"
+        );
+        for (name, workspace) in &self.workspaces {
+            ensure!(
+                valid_name(name),
+                "workspace name {name:?} may contain only letters, numbers, hyphens, and underscores"
+            );
+            ensure!(
+                workspace.path.is_absolute(),
+                "workspaces.{name}.path must be absolute; use ${{ENSO_HOME}}/... for paths inside the Enso home"
+            );
+            if let Some(provider) = &workspace.provider {
+                ensure!(
+                    self.providers.contains_key(provider),
+                    "workspaces.{name}.provider {provider:?} is not defined in providers"
+                );
+            }
+        }
+        for (key, workspace) in &self.slack.dms {
+            ensure!(
+                route_key(key, b"UW"),
+                "slack.dms key {key:?} must be \"*\" or a Slack user ID such as U012345"
+            );
+            ensure!(
+                self.workspaces.contains_key(workspace),
+                "slack.dms.{key} names workspace {workspace:?}, which is not defined in workspaces"
+            );
+        }
+        for (key, route) in &self.slack.channels {
+            ensure!(
+                route_key(key, b"CG"),
+                "slack.channels key {key:?} must be \"*\" or a channel ID such as C012345"
+            );
+            ensure!(
+                self.workspaces.contains_key(route.workspace()),
+                "slack.channels.{key} names workspace {:?}, which is not defined in workspaces",
+                route.workspace()
+            );
         }
         if self.slack.working_reaction.is_empty() {
             bail!("slack.working_reaction must not be empty");
@@ -187,6 +283,12 @@ impl Config {
             .get(name)
             .with_context(|| format!("provider {name:?} is not defined in providers"))?;
         Ok((name, provider))
+    }
+
+    pub fn workspace(&self, name: &str) -> Result<&Workspace> {
+        self.workspaces
+            .get(name)
+            .with_context(|| format!("workspace {name:?} is not defined in workspaces"))
     }
 }
 
@@ -260,7 +362,6 @@ fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loa
     let mut value: serde_json::Value =
         serde_json::from_slice(&config).context("invalid Enso config.json")?;
     expand_value(&mut value, &variables)?;
-    inherit_mentions(&mut value);
     // Avoid serde's invalid-value diagnostics echoing a substituted credential.
     let config: Config = serde_json::from_value(value).map_err(|_| {
         anyhow::anyhow!("invalid config.json fields or value types; see docs/configuration.md")
@@ -270,36 +371,6 @@ fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loa
         env,
         tokens,
     })
-}
-
-fn inherit_mentions(value: &mut serde_json::Value) {
-    let Some(slack) = value
-        .get_mut("slack")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    let global = slack
-        .get("mentions")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(channels) = slack
-        .get_mut("channels")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for channel in channels
-            .values_mut()
-            .filter_map(serde_json::Value::as_object_mut)
-        {
-            for name in ["top_level", "thread"] {
-                if !channel.contains_key(name)
-                    && let Some(rule) = global.get(name)
-                {
-                    channel.insert(name.into(), rule.clone());
-                }
-            }
-        }
-    }
 }
 
 fn expand_value(value: &mut serde_json::Value, variables: &BTreeMap<String, String>) -> Result<()> {
@@ -450,7 +521,7 @@ mod tests {
         );
     }
 
-    const VALID: &str = r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}}}"#;
+    const VALID: &str = r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}},"workspaces":{"main":{"path":"${ENSO_HOME}/workspace"}}}"#;
 
     fn load_config(
         config: &str,
@@ -481,7 +552,13 @@ mod tests {
         assert_eq!(loaded.tokens.bot, "token\"with-quote");
         assert_eq!(loaded.tokens.app, "app");
         assert_eq!(loaded.env["SLACK_APP_TOKEN"], "app");
-        assert!(loaded.config.slack.dm_users.is_empty());
+        assert!(loaded.config.slack.dms.is_empty() && loaded.config.slack.channels.is_empty());
+        assert_eq!(
+            loaded.config.workspaces["main"].path,
+            temp.path().join("workspace")
+        );
+        assert!(loaded.config.workspaces["main"].provider.is_none());
+        assert_eq!(loaded.config.defaults.mention, Mention::Always);
         assert!(loaded.tokens.user.is_none());
         let starter = &loaded.config.providers["main"];
         assert!(starter.model.is_none() && starter.effort.is_none());
@@ -561,7 +638,8 @@ mod tests {
             "providers": {
                 "main": {"cli": "claude", "model": "sonnet", "effort": "high", "args": ["--x"]},
                 "codex": {"cli": "codex", "model": "", "effort": "", "executable": ""}
-            }
+            },
+            "workspaces": {"main": {"path": "/srv/main", "provider": ""}}
         }"#;
         let (_temp, loaded) = load_config(config, "", &[]);
         let config = loaded.unwrap().config;
@@ -623,17 +701,119 @@ mod tests {
         }
     }
 
+    fn routed(workspaces: &str, slack: &str) -> Result<Config> {
+        let config = format!(
+            r#"{{"defaults":{{"provider":"main"}},"providers":{{"main":{{"cli":"claude"}},"codex":{{"cli":"codex"}}}},"workspaces":{workspaces},"slack":{slack}}}"#
+        );
+        let (_temp, loaded) = load_config(&config, "", &[]);
+        let config = loaded?.config;
+        config.validate()?;
+        Ok(config)
+    }
+
     #[test]
-    fn channel_mentions_inherit_global_then_override() {
-        let mut value = serde_json::json!({"defaults":{"provider":"main"},"slack": {
-            "mentions": {"top_level":false,"thread":false},
-            "channels": {"C1":{},"C2":{"top_level":true}}
-        }});
-        inherit_mentions(&mut value);
-        let config: Config = serde_json::from_value(value).unwrap();
-        assert!(!config.slack.channels["C1"].top_level);
-        assert!(!config.slack.channels["C1"].thread);
-        assert!(config.slack.channels["C2"].top_level);
-        assert!(!config.slack.channels["C2"].thread);
+    fn workspaces_and_routes_resolve_names_paths_and_mention_modes() {
+        let config = routed(
+            r#"{"main":{"path":"${ENSO_HOME}/workspace"},"acme":{"path":"/srv/acme","provider":"codex"},"acme-opus":{"path":"/srv/acme"}}"#,
+            r#"{"dms":{"U012345":"acme","W012345":"acme-opus","*":"main"},"channels":{"C012345":"acme","G067890":{"workspace":"acme-opus","mention":"never"},"C111":{"workspace":"main"},"*":"main"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.workspace("acme").unwrap().provider.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            config.workspace("acme-opus").unwrap().path,
+            Path::new("/srv/acme")
+        );
+        assert!(config.workspace("missing").is_err());
+        assert_eq!(config.slack.dms["*"], "main");
+        assert_eq!(config.slack.dms["W012345"], "acme-opus");
+        let channels = &config.slack.channels;
+        assert_eq!(channels["C012345"].workspace(), "acme");
+        assert_eq!(channels["C012345"].mention(), None);
+        assert_eq!(channels["G067890"].workspace(), "acme-opus");
+        assert_eq!(channels["G067890"].mention(), Some(Mention::Never));
+        assert_eq!(channels["C111"].mention(), None);
+        let (_temp, loaded) = load_config(
+            r#"{"defaults":{"provider":"main","mention":"first"},"providers":{"main":{"cli":"claude"}}}"#,
+            "",
+            &[],
+        );
+        assert_eq!(loaded.unwrap().config.defaults.mention, Mention::First);
+    }
+
+    #[test]
+    fn invalid_workspaces_and_routes_are_rejected() {
+        let main = r#"{"main":{"path":"/srv/main"}}"#;
+        for (workspaces, slack, message) in [
+            ("{}", "{}", "at least one workspace"),
+            (
+                r#"{"main":{"path":"workspace"}}"#,
+                "{}",
+                "workspaces.main.path must be absolute; use ${ENSO_HOME}/... for paths inside the Enso home",
+            ),
+            (r#"{"main":{"path":""}}"#, "{}", "must be absolute"),
+            (
+                r#"{"my space":{"path":"/srv"}}"#,
+                "{}",
+                "may contain only letters",
+            ),
+            (
+                r#"{"main":{"path":"/srv","provider":"opus"}}"#,
+                "{}",
+                "workspaces.main.provider \"opus\" is not defined in providers",
+            ),
+            (
+                main,
+                r#"{"dms":{"D012345":"main"}}"#,
+                "slack.dms key \"D012345\"",
+            ),
+            (main, r#"{"dms":{"u012345":"main"}}"#, "slack.dms key"),
+            (main, r#"{"dms":{"":"main"}}"#, "slack.dms key"),
+            (
+                main,
+                r#"{"dms":{"U1":"acme"}}"#,
+                "slack.dms.U1 names workspace \"acme\"",
+            ),
+            (
+                main,
+                r#"{"channels":{"D1":"main"}}"#,
+                "slack.channels key \"D1\"",
+            ),
+            (
+                main,
+                r#"{"channels":{"general":"main"}}"#,
+                "slack.channels key",
+            ),
+            (
+                main,
+                r#"{"channels":{"*":{"workspace":"acme"}}}"#,
+                "slack.channels.* names workspace \"acme\"",
+            ),
+        ] {
+            let error = format!("{:#}", routed(workspaces, slack).unwrap_err());
+            assert!(error.contains(message), "{workspaces} {slack}: {error}");
+        }
+        for slack in [
+            r#"{"dm_users":["U1"]}"#,
+            r#"{"mentions":{"top_level":true,"thread":true}}"#,
+            r#"{"channels":{"C1":{"top_level":true,"thread":false}}}"#,
+            r#"{"channels":{"C1":{"workspace":"main","mention":"sometimes"}}}"#,
+            r#"{"channels":{"C1":{"workspace":"main","thread":false}}}"#,
+            r#"{"dms":["U1"]}"#,
+        ] {
+            let error = format!("{:#}", routed(main, slack).unwrap_err());
+            assert!(
+                error.contains("invalid config.json fields"),
+                "{slack}: {error}"
+            );
+        }
+        let (_temp, loaded) = load_config(
+            r#"{"defaults":{"provider":"main","mention":"top_level"},"providers":{"main":{"cli":"claude"}}}"#,
+            "",
+            &[],
+        );
+        assert!(loaded.is_err());
     }
 }

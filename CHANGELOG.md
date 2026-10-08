@@ -8,12 +8,23 @@ Versioning and publication follow the [release flow](docs/releases.md).
 ### Added
 
 - Named `providers` in `config.json`, each a `cli` (`claude` or `codex`) with
-  optional `model`, `effort`, `executable`, and `args`. Conversations use
-  `defaults.provider`; a job can name another with `provider`. See
+  optional `model`, `effort`, `executable`, and `args`. Runs use
+  `defaults.provider` unless their workspace or job names another. See
   [configuration](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#providers).
 - `defaults.timeout_seconds`, overridable per job with `timeout_seconds`.
 - `${ENSO_HOME}` in `config.json` expands to the Enso home in use.
 - `!status`, the run context, and stored run settings name the provider.
+- Named `workspaces` in `config.json`, each an absolute `path` with an optional
+  `provider`. Agents run in their conversation's or job's workspace, attachments
+  go to its `uploads/<run-id>/`, and `ENSO_WORKSPACE` gives agents and hooks its
+  path. See
+  [workspaces](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#workspaces).
+- `slack.dms` and `slack.channels` route users and channels to workspaces, with
+  `"*"` for any user or channel not listed. Channel `mention` modes (`always`,
+  `first`, `never`) and `defaults.mention` set when a mention is needed. See
+  [Slack routing](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#slack).
+- `!status` shows the conversation's workspace; the run context and stored run
+  settings include the workspace name and path.
 
 ### Changed
 
@@ -28,9 +39,28 @@ Versioning and publication follow the [release flow](docs/releases.md).
 - A blank or left-out `model`, `effort`, or `executable` uses the CLI's own
   default for Claude Code too; Enso no longer defaults Claude to `sonnet`/`high`.
 - `enso config check` reports the default `provider` name instead of `cli`.
+- **Breaking:** jobs require `workspace` in `job.json`, naming a configured
+  workspace. Add `"workspace": "main"` to each existing job.
+- **Breaking:** the context header's `workspace` is an object with `name` and
+  `path` instead of a path string.
+- A conversation's native session is pinned to the CLI and workspace path that
+  created it. Moving a conversation to another workspace path requires `!clear`.
+- **Breaking:** Enso 0.2.0 needs a new `enso.db`; an older database fails to
+  open. Stop the service, move `enso.db` together with any `enso.db-wal` and
+  `enso.db-shm` files aside (for example `mkdir 0.1 && mv enso.db* 0.1/`), and
+  start again. Conversations start fresh sessions, and old run history stays
+  in the moved files.
 
 ### Removed
 
+- **Breaking:** `slack.dm_users`, `slack.mentions`, and per-channel
+  `top_level`/`thread` rules. Rewrite them as routes: add the
+  `workspaces` entry `"main": {"path": "${ENSO_HOME}/workspace"}`, replace
+  `"dm_users": ["U012345"]` with `"dms": {"U012345": "main"}`, and replace each
+  channel entry with `"C012345": "main"` or
+  `"C012345": {"workspace": "main", "mention": "first"}`. Mention rules map as
+  both required → `always`, thread `false` → `first`, both `false` → `never`;
+  top-level `false` with thread `true` has no equivalent.
 - **Breaking:** the job `execution` overrides object. Define a provider and set
   the job's `provider` and `timeout_seconds` instead; see
   [jobs](https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md).

@@ -5,15 +5,18 @@ description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, an
 
 # Enso
 
-Enso runs your installed agent CLI in one workspace. Each turn's injected context
-identifies Slack versus a job, the sender and destination, and local attachments.
+Enso runs your installed agent CLI in a workspace: the directory configured for
+this conversation or job, also in `$ENSO_WORKSPACE`. Each turn's injected context
+identifies Slack versus a job, the workspace, the sender and destination, and
+local attachments.
 DMs share one session, including DM threads. Channel threads have separate sessions.
 Messages in a busy conversation queue in order. Different conversations and jobs
 run in parallel with no global concurrency limit or setting.
 
 For Slack turns, your final response is sent automatically to the current reply
 destination. Use ordinary Markdown. Do not send that same answer again with the CLI.
-Incoming attachments are local files under `uploads/`; inspect the supplied paths.
+Incoming attachments are local files under the workspace's `uploads/`; inspect
+the supplied paths.
 
 ## Read Slack context
 
@@ -94,13 +97,15 @@ the calling turn ends. A job already queued or running skips scheduled
 occurrences without catch-up and rejects additional manual triggers.
 
 Jobs live at `$ENSO_HOME/jobs/JOB/`. A required `prompt.md` is the user request;
-`job.json` sets `cron`, `enabled`, an optional `provider` (a name from
-`providers` in `config.json`), optional `timeout_seconds` per process, and
+`job.json` sets a required `workspace` (a name from `workspaces` in
+`config.json`), `cron`, `enabled`, an optional `provider` (a name from
+`providers`; defaults to the workspace's provider, then `defaults.provider`),
+optional `timeout_seconds` per process, and
 optional `notify`: where the job posts, `{"channel":"C…"}` for a channel or
 `D…` for a DM, plus `"thread":"TS"` for a thread. Omit it for a job that never
 posts. "Here" means this run's reply channel, and its thread only when the
 user means this thread; find other IDs with `enso slack channels`.
-Runs use the shared workspace and fresh native sessions. Optional `prerun.sh` and
+Runs use the job's workspace and fresh native sessions. Optional `prerun.sh` and
 `postrun.sh` run with Bash from the job directory. Prerun stdout provides JSON;
 return `{"vars":{"NAME":"value"}}` to expand `{{NAME}}` in the prompt or
 `{"skip":true,"reason":"Nothing new"}` to skip. Diagnostics go to stderr.
@@ -117,12 +122,13 @@ postrun after accepting, since sent messages are not withdrawn.
 ## Configuration and status
 
 `$ENSO_HOME` defaults to `~/.enso`. `config.json` has `defaults`, named
-`providers`, and Slack settings; `.env` holds the Slack tokens and supplies
-child-process variables and `${NAME}` substitutions in configuration. Keep
-secrets in `.env`, never in prompts or replies. Restart after changing
-`config.json` or `.env`; job files are reread each minute and at run start.
-`enso config check`, `enso service status`, and
-`enso service logs` diagnose operation. `enso --help` shows the command syntax.
+`providers` and `workspaces`, and Slack settings, including `slack.dms` and
+`slack.channels`, which route conversations to workspaces; `.env` holds the
+Slack tokens and supplies child-process variables and `${NAME}` substitutions in
+configuration. Keep secrets in `.env`, never in prompts or replies. Restart after
+changing `config.json` or `.env`; job files are reread each minute and at run
+start. `enso config check`, `enso service status`, and `enso service logs`
+diagnose operation. `enso --help` shows the command syntax.
 
 Slack supports `!clear`, `!stop`, `!status`, and `!help`. These are user controls;
 do not edit the state database to simulate them.

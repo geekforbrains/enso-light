@@ -1,10 +1,10 @@
 //! Cross-module contracts exercised without Slack or native model processes.
 use enso::{
-    config::{Destination, Mentions, SlackConfig, Tokens},
+    config::{ChannelRoute, ChannelSettings, Destination, Mention, SlackConfig, Tokens},
     context,
-    db::Db,
+    db::{Db, Session},
     formatting,
-    slack::{Incoming, Slack},
+    slack::{Admission, Incoming, Slack},
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Barrier};
@@ -16,23 +16,35 @@ fn database() -> (tempfile::TempDir, Db) {
 }
 
 fn incoming(channel: &str, ts: &str, thread: Option<&str>) -> Incoming {
-    let mut config = SlackConfig {
-        dm_users: vec!["U1".into()],
-        ..SlackConfig::default()
-    };
+    let mut config = SlackConfig::default();
+    config.dms.insert("U1".into(), "main".into());
     config.channels.insert(
         "C1".into(),
-        Mentions {
-            top_level: false,
-            thread: false,
-        },
+        ChannelRoute::Settings(ChannelSettings {
+            workspace: "main".into(),
+            mention: Some(Mention::Never),
+        }),
     );
     let slack = Slack::new(&config, &Tokens::default()).unwrap();
     let mut event = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":channel,"user":"U1","ts":ts,"text":"hello"}});
     if let Some(thread) = thread {
         event["event"]["thread_ts"] = json!(thread);
     }
-    slack.normalize(&event, "UBOT", true).unwrap().unwrap()
+    match slack
+        .normalize(&event, "UBOT", Mention::Always, true)
+        .unwrap()
+    {
+        Admission::Accept(incoming) => *incoming,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn session(id: &str) -> Session {
+    Session {
+        id: id.into(),
+        cli: "claude".into(),
+        workspace: "/srv/main".into(),
+    }
 }
 
 fn target(channel: &str, thread: Option<&str>) -> Destination {
@@ -123,13 +135,14 @@ fn dm_threads_share_session_but_runs_preserve_each_reply_destination() {
         "succeeded",
         "answer",
         None,
-        Some("native-session"),
-        "claude",
+        Some(&session("native-session")),
     )
     .unwrap();
     let second_run = db.claim().unwrap().unwrap();
     assert_eq!(second_run.session.as_deref(), Some("native-session"));
-    assert_eq!(second_run.provider.as_deref(), Some("claude"));
+    assert_eq!(second_run.cli.as_deref(), Some("claude"));
+    assert_eq!(second_run.workspace.as_deref(), Some("/srv/main"));
+    assert_eq!(second_run.input["workspace"], "main");
     assert_eq!(second_run.input["reply"]["thread"], "99.001");
     assert_eq!(second_run.input["conversation_thread"], Value::Null);
 }
@@ -169,15 +182,17 @@ fn channel_threads_are_independent_and_clear_preserves_participation() {
         "cancelled",
         "",
         None,
-        Some("old-session"),
-        "claude",
+        Some(&session("old-session")),
     )
     .unwrap();
-    db.clear(&first.conversation_id).unwrap();
     assert_eq!(
-        db.conversation_status(&first.conversation_id).unwrap()["has_session"],
-        false
+        db.conversation_status(&first.conversation_id).unwrap()["cli"],
+        "claude"
     );
+    db.clear(&first.conversation_id).unwrap();
+    let status = db.conversation_status(&first.conversation_id).unwrap();
+    assert_eq!(status["has_session"], false);
+    assert!(status["cli"].is_null() && status["workspace"].is_null());
     assert!(db.participated("C1", "100.001").unwrap());
     assert_eq!(db.run(&other_run.id).unwrap()["state"], "running");
 }
@@ -202,8 +217,7 @@ fn jobs_use_one_queue_for_manual_and_cron_without_overlap_or_replay() {
             .unwrap()
             .is_none()
     );
-    db.finish(&first, "succeeded", "done", None, None, "claude")
-        .unwrap();
+    db.finish(&first, "succeeded", "done", None, None).unwrap();
     // The occurrence skipped while busy must not suddenly run after completion.
     assert!(
         db.enqueue_job("report", "cron", Some("2026-10-06T09:01"))
@@ -212,7 +226,7 @@ fn jobs_use_one_queue_for_manual_and_cron_without_overlap_or_replay() {
     );
     let manual = db.enqueue_job("report", "manual", None).unwrap().unwrap();
     assert_eq!(db.claim().unwrap().unwrap().id, manual);
-    db.finish(&manual, "succeeded", "manual done", None, None, "claude")
+    db.finish(&manual, "succeeded", "manual done", None, None)
         .unwrap();
     assert_eq!(db.last_job("report").unwrap()["id"], manual);
     // A repeated local clock value (e.g. DST) is a duplicate, not a SQL failure.
@@ -343,15 +357,8 @@ fn background_from_any_dm_thread_is_context_only_after_confirmed_send() {
     let metadata = json!({"background_ids":[threaded, top_level]});
     db.snapshot(&first.id, &prompt, &metadata, &json!({}))
         .unwrap();
-    db.finish(
-        &first.id,
-        "failed",
-        "",
-        Some("fake failure"),
-        None,
-        "claude",
-    )
-    .unwrap();
+    db.finish(&first.id, "failed", "", Some("fake failure"), None)
+        .unwrap();
     assert_eq!(db.background(&initial.conversation_id).unwrap().len(), 2);
     db.accept(&incoming("D1", "102.001", None), false)
         .unwrap()
@@ -364,8 +371,7 @@ fn background_from_any_dm_thread_is_context_only_after_confirmed_send() {
         "succeeded",
         "summary",
         None,
-        Some("session"),
-        "claude",
+        Some(&session("session")),
     )
     .unwrap();
     assert!(db.background(&initial.conversation_id).unwrap().is_empty());
@@ -414,8 +420,7 @@ fn chat_sent_messages_are_consumed_only_in_the_source_conversation() {
         "succeeded",
         "Finished",
         None,
-        Some("native-session"),
-        "claude",
+        Some(&session("native-session")),
     )
     .unwrap();
     assert!(db.background(&source.conversation_id).unwrap().is_empty());
@@ -485,8 +490,7 @@ fn recovery_interrupts_work_retains_sessions_and_never_replays_uncertain_sends()
         "succeeded",
         "answer",
         None,
-        Some("native-session"),
-        "claude",
+        Some(&session("native-session")),
     )
     .unwrap();
     db.accept(&incoming("D1", "101.001", None), false)
@@ -578,4 +582,30 @@ fn file_receipt_keeps_file_identity_and_routes_background_by_actual_share_messag
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn databases_from_other_schema_versions_are_rejected_without_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("enso.db");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE conversations(id TEXT PRIMARY KEY,provider TEXT); PRAGMA user_version=1;",
+        )
+        .unwrap();
+    drop(connection);
+    let error = Db::open(directory.path()).err().unwrap().to_string();
+    assert_eq!(
+        error,
+        "enso.db uses schema 1; Enso 0.2.0 needs a new database. Move enso.db and its -wal/-shm files aside (see the 0.2.0 changelog)."
+    );
+    let fresh = tempfile::tempdir().unwrap();
+    Db::open(fresh.path()).unwrap();
+    Db::open(fresh.path()).unwrap();
+    let version: i64 = rusqlite::Connection::open(fresh.path().join("enso.db"))
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
 }

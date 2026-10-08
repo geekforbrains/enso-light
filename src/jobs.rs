@@ -11,7 +11,7 @@ use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{Config, Destination};
+use crate::config::{self, Config, Destination};
 
 /// Upper bound on `retries`, since each retry is a full agent turn.
 pub const MAX_RETRIES: u32 = 10;
@@ -21,6 +21,7 @@ pub struct Job {
     pub name: String,
     pub directory: PathBuf,
     pub prompt: String,
+    pub workspace: String,
     pub provider: Option<String>,
     pub timeout_seconds: Option<u64>,
     pub cron: Option<String>,
@@ -38,6 +39,7 @@ struct Definition {
     cron: Option<String>,
     #[serde(default = "enabled")]
     enabled: bool,
+    workspace: String,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
@@ -75,10 +77,7 @@ pub fn list(home: &Path, config: &Config) -> Result<Vec<Job>> {
 
 pub fn load(home: &Path, name: &str, config: &Config) -> Result<Job> {
     ensure!(
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')),
+        config::valid_name(name),
         "job names may contain only letters, numbers, hyphens, and underscores"
     );
     let directory = home.join("jobs").join(name);
@@ -95,6 +94,9 @@ pub fn load(home: &Path, name: &str, config: &Config) -> Result<Job> {
             .validate()
             .with_context(|| format!("job {name}: invalid notify"))?;
     }
+    config
+        .workspace(&definition.workspace)
+        .with_context(|| format!("job {name}: invalid workspace"))?;
     if let Some(provider) = &definition.provider {
         config
             .provider(Some(provider))
@@ -120,6 +122,7 @@ pub fn load(home: &Path, name: &str, config: &Config) -> Result<Job> {
         name: name.into(),
         directory,
         prompt,
+        workspace: definition.workspace,
         provider: definition.provider,
         timeout_seconds: definition.timeout_seconds,
         cron: definition.cron,
@@ -316,7 +319,7 @@ mod tests {
 
     fn defaults() -> Config {
         serde_json::from_str(
-            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}}}"#,
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}},"workspaces":{"main":{"path":"/srv/main"},"acme":{"path":"/srv/acme"}}}"#,
         )
         .unwrap()
     }
@@ -331,15 +334,42 @@ mod tests {
             fs::write(directory.join("job.json"), definition).unwrap();
             load(temp.path(), "report", &defaults())
         };
-        let job = load_with("{}").unwrap();
+        let job = load_with(r#"{"workspace":"main"}"#).unwrap();
         assert!(job.provider.is_none() && job.timeout_seconds.is_none());
-        let job = load_with(r#"{"provider":"opus","timeout_seconds":600}"#).unwrap();
+        assert_eq!(job.workspace, "main");
+        let job =
+            load_with(r#"{"workspace":"acme","provider":"opus","timeout_seconds":600}"#).unwrap();
+        assert_eq!(job.workspace, "acme");
         assert_eq!(job.provider.as_deref(), Some("opus"));
         assert_eq!(job.timeout_seconds, Some(600));
-        let error = load_with(r#"{"provider":"missing"}"#).unwrap_err();
+        let error = load_with(r#"{"workspace":"main","provider":"missing"}"#).unwrap_err();
         assert!(format!("{error:#}").contains("provider \"missing\" is not defined"));
-        assert!(load_with(r#"{"timeout_seconds":0}"#).is_err());
-        assert!(load_with(r#"{"execution":{"model":"opus"}}"#).is_err());
+        assert!(load_with(r#"{"workspace":"main","timeout_seconds":0}"#).is_err());
+        assert!(load_with(r#"{"workspace":"main","execution":{"model":"opus"}}"#).is_err());
+    }
+
+    #[test]
+    fn jobs_require_a_configured_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("jobs/report");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
+        let load_with = |definition: &str| {
+            fs::write(directory.join("job.json"), definition).unwrap();
+            format!(
+                "{:#}",
+                load(temp.path(), "report", &defaults()).unwrap_err()
+            )
+        };
+        let missing = load_with("{}");
+        assert!(missing.contains("missing field `workspace`"), "{missing}");
+        let unknown = load_with(r#"{"workspace":"other"}"#);
+        assert!(
+            unknown.contains("job report: invalid workspace")
+                && unknown.contains("workspace \"other\" is not defined in workspaces"),
+            "{unknown}"
+        );
+        assert!(list(temp.path(), &defaults()).is_err());
     }
 
     #[test]
@@ -347,7 +377,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().join("jobs/report");
         fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("job.json"), r#"{"cron":"0 9 * * MON-FRI"}"#).unwrap();
+        fs::write(
+            directory.join("job.json"),
+            r#"{"workspace":"main","cron":"0 9 * * MON-FRI"}"#,
+        )
+        .unwrap();
         assert!(load(temp.path(), "report", &defaults()).is_err());
         fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
         fs::write(directory.join("prerun.sh"), "").unwrap();
@@ -355,14 +389,26 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].enabled && jobs[0].prerun && !jobs[0].postrun);
         assert_eq!(jobs[0].retries, 0);
-        fs::write(directory.join("job.json"), r#"{"retries":10}"#).unwrap();
+        fs::write(
+            directory.join("job.json"),
+            r#"{"workspace":"main","retries":10}"#,
+        )
+        .unwrap();
         assert_eq!(
             load(temp.path(), "report", &defaults()).unwrap().retries,
             10
         );
-        fs::write(directory.join("job.json"), r#"{"retries":11}"#).unwrap();
+        fs::write(
+            directory.join("job.json"),
+            r#"{"workspace":"main","retries":11}"#,
+        )
+        .unwrap();
         assert!(load(temp.path(), "report", &defaults()).is_err());
-        fs::write(directory.join("job.json"), r#"{"retries":-1}"#).unwrap();
+        fs::write(
+            directory.join("job.json"),
+            r#"{"workspace":"main","retries":-1}"#,
+        )
+        .unwrap();
         assert!(load(temp.path(), "report", &defaults()).is_err());
         assert!(load(temp.path(), "../other", &defaults()).is_err());
     }
@@ -377,22 +423,32 @@ mod tests {
             fs::write(directory.join("job.json"), definition).unwrap();
             load(temp.path(), "report", &defaults())
         };
-        assert!(load_with("{}").unwrap().notify.is_none());
+        assert!(
+            load_with(r#"{"workspace":"main"}"#)
+                .unwrap()
+                .notify
+                .is_none()
+        );
         for invalid in [
-            r#"{"notify":{"channel":""}}"#,
-            r##"{"notify":{"channel":"#general"}}"##,
-            r#"{"notify":{"channel":"U012345"}}"#,
-            r#"{"notify":{"channel":"C012345","thread":""}}"#,
-            r#"{"notify":{"channel":"C012345","thread":"yesterday"}}"#,
+            r#"{"workspace":"main","notify":{"channel":""}}"#,
+            r##"{"workspace":"main","notify":{"channel":"#general"}}"##,
+            r#"{"workspace":"main","notify":{"channel":"U012345"}}"#,
+            r#"{"workspace":"main","notify":{"channel":"C012345","thread":""}}"#,
+            r#"{"workspace":"main","notify":{"channel":"C012345","thread":"yesterday"}}"#,
         ] {
             assert!(load_with(invalid).is_err(), "{invalid}");
         }
         for channel in ["C012345", "G012345", "D012345"] {
-            let job = load_with(&format!(r#"{{"notify":{{"channel":"{channel}"}}}}"#)).unwrap();
+            let job = load_with(&format!(
+                r#"{{"workspace":"main","notify":{{"channel":"{channel}"}}}}"#
+            ))
+            .unwrap();
             assert_eq!(job.notify.unwrap().channel, channel);
         }
-        let job =
-            load_with(r#"{"notify":{"channel":"C012345","thread":"1700000000.000001"}}"#).unwrap();
+        let job = load_with(
+            r#"{"workspace":"main","notify":{"channel":"C012345","thread":"1700000000.000001"}}"#,
+        )
+        .unwrap();
         assert_eq!(
             job.notify.unwrap().thread.as_deref(),
             Some("1700000000.000001")

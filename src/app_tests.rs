@@ -37,7 +37,7 @@ impl Fixture {
         config::init(home.path()).unwrap();
         fs::write(
             home.path().join(".env"),
-            "SLACK_BOT_TOKEN=test-bot-token\nSLACK_APP_TOKEN=test-app-token\nSETTING=available-from-dotenv\nENSO_CHANNEL=stale-channel\nENSO_THREAD_TS=stale-thread\nENSO_JOB=stale-job\n",
+            "SLACK_BOT_TOKEN=test-bot-token\nSLACK_APP_TOKEN=test-app-token\nSETTING=available-from-dotenv\nENSO_CHANNEL=stale-channel\nENSO_THREAD_TS=stale-thread\nENSO_JOB=stale-job\nENSO_WORKSPACE=stale-workspace\n",
         )
         .unwrap();
         let executable = home.path().join("fake-claude");
@@ -52,11 +52,12 @@ impl Fixture {
         fs::write(
             &executable,
             format!(
-                "#!/bin/bash\nset -eu\ntouch \"$ENSO_HOME/provider-ran\"\ncat > \"input-$ENSO_RUN_ID.txt\"\nprintf '%s\\n' \"$@\" > \"args-$ENSO_RUN_ID.txt\"\nprintf '%s\\n' \"$SETTING\" \"$ENSO_SOURCE\" \"$ENSO_JOB\" \"$ENSO_CHANNEL\" \"$ENSO_THREAD_TS\" > \"env-$ENSO_RUN_ID.txt\"\n{finish}"
+                "#!/bin/bash\nset -eu\ntouch \"$ENSO_HOME/provider-ran\"\ncat > \"input-$ENSO_RUN_ID.txt\"\nprintf '%s\\n' \"$@\" > \"args-$ENSO_RUN_ID.txt\"\nprintf '%s\\n' \"$SETTING\" \"$ENSO_SOURCE\" \"$ENSO_JOB\" \"$ENSO_CHANNEL\" \"$ENSO_THREAD_TS\" \"$ENSO_WORKSPACE\" > \"env-$ENSO_RUN_ID.txt\"\n{finish}"
             ),
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(home.path().join("acme")).unwrap();
         fs::write(
             home.path().join("config.json"),
             json!({
@@ -64,7 +65,12 @@ impl Fixture {
                 "providers": {
                     "main": {"cli": "claude", "executable": executable},
                     "opus": {"cli": "claude", "executable": executable, "model": "opus", "effort": "low", "args": ["--opus"]}
-                }
+                },
+                "workspaces": {
+                    "main": {"path": "${ENSO_HOME}/workspace"},
+                    "acme": {"path": "${ENSO_HOME}/acme", "provider": "opus"}
+                },
+                "slack": {"dms": {"U1": "main", "UACME": "acme"}}
             })
             .to_string(),
         )
@@ -86,14 +92,14 @@ impl Fixture {
         fs::create_dir(&directory).unwrap();
         fs::write(
             directory.join("job.json"),
-            r#"{"notify":{"channel":"DREPORT","thread":"1700000000.000001"}}"#,
+            r#"{"workspace":"main","notify":{"channel":"DREPORT","thread":"1700000000.000001"}}"#,
         )
         .unwrap();
         fs::write(directory.join("prompt.md"), prompt).unwrap();
         fs::write(directory.join("prerun.sh"), prerun).unwrap();
         fs::write(
             directory.join("postrun.sh"),
-            "set -eu\ncat > postrun-input.json\nprintf '%s\\n' \"$SETTING\" \"$ENSO_SOURCE\" \"$ENSO_JOB\" \"$ENSO_CHANNEL\" \"$ENSO_THREAD_TS\" > postrun-env.txt\n",
+            "set -eu\ncat > postrun-input.json\nprintf '%s\\n' \"$SETTING\" \"$ENSO_SOURCE\" \"$ENSO_JOB\" \"$ENSO_CHANNEL\" \"$ENSO_THREAD_TS\" \"$ENSO_WORKSPACE\" > postrun-env.txt\n",
         )
         .unwrap();
         self.db.enqueue_job(name, "manual", None).unwrap();
@@ -114,13 +120,45 @@ impl Fixture {
     }
 
     fn captured(&self, prefix: &str, run: &Run) -> String {
+        self.captured_in("workspace", prefix, run)
+    }
+
+    fn captured_in(&self, workspace: &str, prefix: &str, run: &Run) -> String {
         fs::read_to_string(
             self.home
                 .path()
-                .join("workspace")
+                .join(workspace)
                 .join(format!("{prefix}-{}.txt", run.id)),
         )
         .unwrap()
+    }
+
+    fn workspace(&self, name: &str) -> String {
+        self.home.path().join(name).to_string_lossy().into_owned()
+    }
+
+    async fn finish(&self, run: &Run, input: Option<&Incoming>, loaded: &Loaded) -> Completion {
+        let completion = execute_inner(
+            self.home.path(),
+            &self.db,
+            &self.slack,
+            loaded,
+            run,
+            input,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        self.db
+            .finish(
+                &run.id,
+                &completion.0,
+                &completion.1,
+                completion.2.as_deref(),
+                completion.3.as_ref(),
+            )
+            .unwrap();
+        completion
     }
 
     fn snapshot(&self, run: &Run) -> (String, Value, Value) {
@@ -169,7 +207,7 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     let (run, directory) = fixture.job(
         "report",
         "Produce {{COUNT}} reports for {{NAME}}. Ready: {{READY}}.",
-        "set -eu\ncat > prerun-input.json\nprintf '%s\\n' \"$SETTING\" \"$ENSO_SOURCE\" \"$ENSO_JOB\" > prerun-env.txt\nprintf '%s\\n' '{\"vars\":{\"COUNT\":3,\"NAME\":\"Gavin\",\"READY\":true}}'\n",
+        "set -eu\ncat > prerun-input.json\nprintf '%s\\n' \"$SETTING\" \"$ENSO_SOURCE\" \"$ENSO_JOB\" \"$ENSO_WORKSPACE\" > prerun-env.txt\nprintf '%s\\n' '{\"vars\":{\"COUNT\":3,\"NAME\":\"Gavin\",\"READY\":true}}'\n",
     );
     fixture.run_job(&run).await;
     let outcome = fixture.db.run(&run.id).unwrap();
@@ -194,7 +232,11 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     assert!(settings["model"].is_null() && settings["effort"].is_null());
     assert_eq!(settings["args"], json!([]));
     assert_eq!(settings["timeout_seconds"], 5);
+    let workspace = fixture.workspace("workspace");
+    let expected_workspace = json!({"name":"main","path":workspace});
+    assert_eq!(settings["workspace"], expected_workspace);
     assert_eq!(header["provider"], "main");
+    assert_eq!(header["workspace"], expected_workspace);
     assert_eq!(json_file(&directory.join("prerun-input.json")), header);
     let post = json_file(&directory.join("postrun-input.json"));
     assert_eq!(post["run_id"], run.id);
@@ -213,9 +255,10 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     assert!(outcome["attempts"].is_null());
     assert_eq!(
         fs::read_to_string(directory.join("prerun-env.txt")).unwrap(),
-        "available-from-dotenv\njob\nreport\n"
+        format!("available-from-dotenv\njob\nreport\n{workspace}\n")
     );
-    let expected_env = "available-from-dotenv\njob\nreport\nDREPORT\n1700000000.000001\n";
+    let expected_env =
+        format!("available-from-dotenv\njob\nreport\nDREPORT\n1700000000.000001\n{workspace}\n");
     assert_eq!(fixture.captured("env", &run), expected_env);
     assert_eq!(
         fs::read_to_string(directory.join("postrun-env.txt")).unwrap(),
@@ -300,7 +343,7 @@ async fn postrun_retry_resumes_the_session_with_its_message_until_accepted() {
     let (run, directory) = retrying_job(
         &fixture,
         "retry",
-        r#"{"retries":2}"#,
+        r#"{"workspace":"main","retries":2}"#,
         "echo 'checking output' >&2\n[ \"$n\" = 1 ] && printf '%s\\n' '{\"retry\":true,\"message\":\"The chart is missing.\"}'\nexit 0\n",
     );
     fixture.run_job(&run).await;
@@ -344,7 +387,7 @@ async fn postrun_retries_after_agent_failure_start_fresh_and_are_limited() {
     let (run, directory) = retrying_job(
         &fixture,
         "limited",
-        r#"{"retries":1}"#,
+        r#"{"workspace":"main","retries":1}"#,
         "printf '%s\\n' '{\"retry\":true,\"message\":\"Try again.\"}'\n",
     );
     fixture.run_job(&run).await;
@@ -371,7 +414,7 @@ async fn postrun_retry_without_retries_or_invalid_output_fails_the_run() {
     let (run, directory) = retrying_job(
         &fixture,
         "no-retries",
-        "{}",
+        r#"{"workspace":"main"}"#,
         "printf '%s\\n' '{\"retry\":true,\"message\":\"Again.\"}'\n",
     );
     fixture.run_job(&run).await;
@@ -382,7 +425,12 @@ async fn postrun_retry_without_retries_or_invalid_output_fails_the_run() {
         "postrun requested a retry with no retries left (retries: 0): Again."
     );
     assert_eq!(read(&directory, "attempts"), "1\n");
-    let (run, directory) = retrying_job(&fixture, "chatty", r#"{"retries":3}"#, "echo done\n");
+    let (run, directory) = retrying_job(
+        &fixture,
+        "chatty",
+        r#"{"workspace":"main","retries":3}"#,
+        "echo done\n",
+    );
     fixture.run_job(&run).await;
     let outcome = fixture.db.run(&run.id).unwrap();
     assert_eq!(outcome["state"], "failed");
@@ -413,6 +461,7 @@ fn incoming(ts: &str, thread: Option<&str>, user: &str, name: &str, text: &str) 
             thread: thread.map(str::to_owned),
         },
         files: vec![],
+        workspace: "main".into(),
     }
 }
 
@@ -462,7 +511,12 @@ async fn dispatch_runs_independent_work_without_a_cap_and_queues_busy_conversati
             tasks.spawn(async move {
                 started.send(work.id.clone()).await.unwrap();
                 release.cancelled().await;
-                db.finish(&work.id, "succeeded", "done", None, Some(SESSION), "claude")
+                let session = Session {
+                    id: SESSION.into(),
+                    cli: "claude".into(),
+                    workspace: "/srv/main".into(),
+                };
+                db.finish(&work.id, "succeeded", "done", None, Some(&session))
                     .unwrap();
             });
         };
@@ -539,19 +593,12 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
         "Earlier background report",
     );
     let run = fixture.db.claim().unwrap().unwrap();
-    let completion = execute_inner(
-        fixture.home.path(),
-        &fixture.db,
-        &fixture.slack,
-        &fixture.loaded,
-        &run,
-        Some(&first),
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let completion = fixture.finish(&run, Some(&first), &fixture.loaded).await;
     assert_eq!(completion.0, "succeeded");
-    assert_eq!(completion.3.as_deref(), Some(SESSION));
+    let session = completion.3.unwrap();
+    assert_eq!(session.id, SESSION);
+    assert_eq!(session.cli, "claude");
+    assert_eq!(session.workspace, fixture.workspace("workspace"));
     let (prompt, header, _) = fixture.snapshot(&run);
     assert_eq!(prompt, fixture.captured("input", &run));
     assert!(prompt.contains("You are Enso, a personal assistant reached through Slack."));
@@ -567,28 +614,24 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(header["attachments"], json!([]));
     assert_eq!(header["background_ids"], json!([first_background]));
     assert_eq!(
+        header["workspace"],
+        json!({"name":"main","path":fixture.workspace("workspace")})
+    );
+    assert_eq!(
         fixture.captured("env", &run),
-        "available-from-dotenv\nslack\n\nDCHAT\n\n"
+        format!(
+            "available-from-dotenv\nslack\n\nDCHAT\n\n{}\n",
+            fixture.workspace("workspace")
+        )
     );
     assert!(
-        fixture
+        !fixture
             .home
             .path()
             .join("workspace/uploads")
             .join(&run.id)
-            .is_dir()
+            .exists()
     );
-    fixture
-        .db
-        .finish(
-            &run.id,
-            &completion.0,
-            &completion.1,
-            completion.2.as_deref(),
-            completion.3.as_deref(),
-            &completion.4,
-        )
-        .unwrap();
     assert!(
         fixture
             .db
@@ -637,7 +680,7 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     .await
     .unwrap();
     assert_eq!(completion.0, "succeeded");
-    assert_eq!(completion.3.as_deref(), Some(SESSION));
+    assert_eq!(completion.3.unwrap().id, SESSION);
     let (prompt, header, settings) = fixture.snapshot(&resumed);
     assert!(!prompt.contains("You are Enso, a personal assistant reached through Slack."));
     assert!(!prompt.contains("Earlier background report"));
@@ -657,7 +700,10 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(header["provider"], "opus");
     assert_eq!(
         fixture.captured("env", &resumed),
-        "available-from-dotenv\nslack\n\nDCHAT\n1700000001.000001\n"
+        format!(
+            "available-from-dotenv\nslack\n\nDCHAT\n1700000001.000001\n{}\n",
+            fixture.workspace("workspace")
+        )
     );
     let args = fixture.captured("args", &resumed);
     assert!(args.contains(&format!("--resume\n{SESSION}\n")));
@@ -665,34 +711,12 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert!(args.contains("--effort\nlow\n"));
 }
 
-#[tokio::test]
-async fn resuming_a_session_under_a_provider_with_another_cli_requires_clear() {
-    let fixture = Fixture::new(false);
+/// Finishes one DM turn and admits a follow-up that resumes its session.
+async fn resumable(fixture: &Fixture) -> (Incoming, Run, String) {
     let first = incoming("1700000001.000001", None, "U1", "Gavin", "First");
-    fixture.db.accept(&first, false).unwrap().unwrap();
+    let accepted = fixture.db.accept(&first, false).unwrap().unwrap();
     let run = fixture.db.claim().unwrap().unwrap();
-    let completion = execute_inner(
-        fixture.home.path(),
-        &fixture.db,
-        &fixture.slack,
-        &fixture.loaded,
-        &run,
-        Some(&first),
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    fixture
-        .db
-        .finish(
-            &run.id,
-            &completion.0,
-            &completion.1,
-            completion.2.as_deref(),
-            completion.3.as_deref(),
-            &completion.4,
-        )
-        .unwrap();
+    fixture.finish(&run, Some(&first), &fixture.loaded).await;
     let second = incoming(
         "1700000002.000001",
         Some("1700000001.000001"),
@@ -703,32 +727,147 @@ async fn resuming_a_session_under_a_provider_with_another_cli_requires_clear() {
     fixture.db.accept(&second, false).unwrap().unwrap();
     let resumed = fixture.db.claim().unwrap().unwrap();
     assert_eq!(resumed.session.as_deref(), Some(SESSION));
-    let mut current = fixture.loaded.clone();
-    let mut codex = current.config.providers["main"].clone();
-    codex.cli = "codex".into();
-    current.config.providers.insert("codex".into(), codex);
-    current.config.defaults.provider = "codex".into();
+    assert_eq!(resumed.cli.as_deref(), Some("claude"));
+    assert_eq!(
+        resumed.workspace.as_deref(),
+        Some(fixture.workspace("workspace").as_str())
+    );
+    (second, resumed, accepted.conversation_id)
+}
+
+async fn resume_error(fixture: &Fixture, loaded: &Loaded, run: &Run, input: &Incoming) -> String {
     let error = execute_inner(
         fixture.home.path(),
         &fixture.db,
         &fixture.slack,
-        &current,
-        &resumed,
-        Some(&second),
+        loaded,
+        run,
+        Some(input),
         CancellationToken::new(),
     )
     .await
     .unwrap_err()
     .to_string();
-    assert!(error.contains("Configured CLI changed"), "{error}");
     assert!(
         !fixture
             .home
             .path()
             .join("workspace")
-            .join(format!("input-{}.txt", resumed.id))
+            .join(format!("input-{}.txt", run.id))
             .exists()
     );
+    error
+}
+
+#[tokio::test]
+async fn resuming_a_session_under_a_provider_with_another_cli_requires_clear() {
+    let fixture = Fixture::new(false);
+    let (second, resumed, _) = resumable(&fixture).await;
+    let mut current = fixture.loaded.clone();
+    let mut codex = current.config.providers["main"].clone();
+    codex.cli = "codex".into();
+    current.config.providers.insert("codex".into(), codex);
+    current.config.defaults.provider = "codex".into();
+    let error = resume_error(&fixture, &current, &resumed, &second).await;
+    assert!(error.contains("Configured CLI changed"), "{error}");
+}
+
+#[tokio::test]
+async fn a_session_is_pinned_to_its_workspace_path_until_clear() {
+    let fixture = Fixture::new(false);
+    let (mut second, resumed, conversation) = resumable(&fixture).await;
+    // The same path under another name keeps the session; a new path does not.
+    let mut current = fixture.loaded.clone();
+    current.config.workspaces.get_mut("main").unwrap().path = fixture.home.path().join("acme");
+    let error = resume_error(&fixture, &current, &resumed, &second).await;
+    assert_eq!(
+        error,
+        "This conversation's workspace changed. Use !clear to start a fresh session in main."
+    );
+    fixture
+        .db
+        .finish(&resumed.id, "failed", "", Some(&error), None)
+        .unwrap();
+    let mut alias = fixture.loaded.clone();
+    let main = alias.config.workspaces["main"].clone();
+    alias.config.workspaces.insert("same".into(), main);
+    second.message_ts = "1700000003.000001".into();
+    second.workspace = "same".into();
+    fixture.db.accept(&second, false).unwrap().unwrap();
+    let run = fixture.db.claim().unwrap().unwrap();
+    fixture.finish(&run, Some(&second), &alias).await;
+    assert!(
+        fixture
+            .captured("args", &run)
+            .contains(&format!("--resume\n{SESSION}\n"))
+    );
+    fixture.db.clear(&conversation).unwrap();
+    let status = fixture.db.conversation_status(&conversation).unwrap();
+    assert_eq!(
+        (&status["has_session"], &status["cli"], &status["workspace"]),
+        (&json!(false), &Value::Null, &Value::Null)
+    );
+    second.message_ts = "1700000004.000001".into();
+    second.workspace = "acme".into();
+    fixture.db.accept(&second, false).unwrap().unwrap();
+    let run = fixture.db.claim().unwrap().unwrap();
+    assert!(run.session.is_none() && run.cli.is_none() && run.workspace.is_none());
+    let completion = fixture.finish(&run, Some(&second), &fixture.loaded).await;
+    assert_eq!(completion.3.unwrap().workspace, fixture.workspace("acme"));
+}
+
+#[tokio::test]
+async fn chat_runs_in_the_routed_workspace_with_its_provider() {
+    let fixture = Fixture::new(false);
+    let mut input = incoming("1700000001.000001", None, "UACME", "Gavin", "Hi");
+    input.workspace = "acme".into();
+    fixture.db.accept(&input, false).unwrap().unwrap();
+    let run = fixture.db.claim().unwrap().unwrap();
+    fixture.finish(&run, Some(&input), &fixture.loaded).await;
+    let acme = fixture.workspace("acme");
+    assert!(
+        fixture
+            .captured_in("acme", "args", &run)
+            .contains("--opus\n--model\nopus\n")
+    );
+    assert!(
+        fixture
+            .captured_in("acme", "env", &run)
+            .ends_with(&format!("\n{acme}\n"))
+    );
+    assert!(!fixture.home.path().join("acme/uploads").exists());
+    assert!(
+        !fixture
+            .home
+            .path()
+            .join("workspace/uploads")
+            .join(&run.id)
+            .exists()
+    );
+    let (_, header, settings) = fixture.snapshot(&run);
+    assert_eq!(header["workspace"], json!({"name":"acme","path":acme}));
+    assert_eq!(header["provider"], "opus");
+    assert_eq!(settings["workspace"], json!({"name":"acme","path":acme}));
+    assert_eq!(settings["provider"], "opus");
+}
+
+#[tokio::test]
+async fn a_missing_workspace_directory_fails_the_run() {
+    let fixture = Fixture::new(false);
+    fs::remove_dir(fixture.home.path().join("acme")).unwrap();
+    let mut input = incoming("1700000001.000001", None, "UACME", "Gavin", "Hi");
+    input.workspace = "acme".into();
+    fixture.db.accept(&input, false).unwrap().unwrap();
+    let run = fixture.db.claim().unwrap().unwrap();
+    let error = resume_error(&fixture, &fixture.loaded, &run, &input).await;
+    assert_eq!(
+        error,
+        format!(
+            "workspace acme directory does not exist: {}",
+            fixture.workspace("acme")
+        )
+    );
+    assert!(!fixture.home.path().join("provider-ran").exists());
 }
 
 #[tokio::test]
@@ -768,6 +907,16 @@ async fn attachment_download_uses_the_resolved_timeout() {
     assert!(error.contains("timed_out: attachment download"), "{error}");
     assert!(started.elapsed() < Duration::from_secs(4));
     assert!(!fixture.home.path().join("provider-ran").exists());
+    for path in [
+        "workspace/uploads".to_owned(),
+        format!("workspace/uploads/{}", run.id),
+    ] {
+        let mode = fs::metadata(fixture.home.path().join(path))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 }
 
 #[tokio::test]
@@ -776,7 +925,7 @@ async fn jobs_select_a_named_provider_and_their_own_timeout() {
     let (run, directory) = fixture.job("chosen", "Use opus.", "cat >/dev/null\n");
     fs::write(
         directory.join("job.json"),
-        r#"{"provider":"opus","timeout_seconds":9}"#,
+        r#"{"workspace":"main","provider":"opus","timeout_seconds":9}"#,
     )
     .unwrap();
     fixture.run_job(&run).await;
@@ -794,12 +943,55 @@ async fn jobs_select_a_named_provider_and_their_own_timeout() {
     assert_eq!(post["provider"], "opus");
 }
 
+#[tokio::test]
+async fn job_provider_wins_over_the_workspace_provider_then_the_default() {
+    let fixture = Fixture::new(false);
+    let acme = fixture.workspace("acme");
+    for (name, definition, provider) in [
+        ("inherits", r#"{"workspace":"acme"}"#, "opus"),
+        (
+            "explicit",
+            r#"{"workspace":"acme","provider":"main"}"#,
+            "main",
+        ),
+    ] {
+        let directory = fixture.home.path().join("jobs").join(name);
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("job.json"), definition).unwrap();
+        fs::write(directory.join("prompt.md"), "Work.").unwrap();
+        fs::write(
+            directory.join("postrun.sh"),
+            "cat >/dev/null\nprintf '%s\\n' \"$ENSO_WORKSPACE\" > postrun-env.txt\n",
+        )
+        .unwrap();
+        fixture.db.enqueue_job(name, "manual", None).unwrap();
+        let run = fixture.db.claim().unwrap().unwrap();
+        fixture.run_job(&run).await;
+        assert_eq!(fixture.db.run(&run.id).unwrap()["state"], "succeeded");
+        let (_, header, settings) = fixture.snapshot(&run);
+        assert_eq!(header["provider"], provider, "{name}");
+        assert_eq!(settings["provider"], provider, "{name}");
+        assert_eq!(header["workspace"], json!({"name":"acme","path":acme}));
+        // The agent runs in the workspace; hooks stay in the job directory.
+        assert!(
+            fixture
+                .captured_in("acme", "env", &run)
+                .ends_with(&format!("\n{acme}\n"))
+        );
+        assert_eq!(read(&directory, "postrun-env.txt"), format!("{acme}\n"));
+    }
+}
+
 // The fixture default is 5s, so each 3s process only times out under the job's 1s override.
 #[tokio::test]
 async fn job_timeout_overrides_the_default_for_prerun() {
     let fixture = Fixture::new(false);
     let (run, directory) = fixture.job("slow", "Never runs.", "cat >/dev/null\nsleep 3\n");
-    fs::write(directory.join("job.json"), r#"{"timeout_seconds":1}"#).unwrap();
+    fs::write(
+        directory.join("job.json"),
+        r#"{"workspace":"main","timeout_seconds":1}"#,
+    )
+    .unwrap();
     fixture.run_job(&run).await;
     let outcome = fixture.db.run(&run.id).unwrap();
     assert_eq!(outcome["state"], "timed_out", "{outcome}");
@@ -819,7 +1011,7 @@ async fn job_timeout_overrides_the_default_for_agent_attempts() {
     let (run, directory) = fixture.job("slow", "Sleep.", "cat >/dev/null\n");
     fs::write(
         directory.join("job.json"),
-        r#"{"provider":"slow","timeout_seconds":1}"#,
+        r#"{"workspace":"main","provider":"slow","timeout_seconds":1}"#,
     )
     .unwrap();
     execute(
@@ -842,7 +1034,11 @@ async fn job_timeout_overrides_the_default_for_agent_attempts() {
 async fn job_timeout_overrides_the_default_for_postrun() {
     let fixture = Fixture::new(false);
     let (run, directory) = fixture.job("slow", "Finish.", "cat >/dev/null\n");
-    fs::write(directory.join("job.json"), r#"{"timeout_seconds":1}"#).unwrap();
+    fs::write(
+        directory.join("job.json"),
+        r#"{"workspace":"main","timeout_seconds":1}"#,
+    )
+    .unwrap();
     fs::write(directory.join("postrun.sh"), "cat >/dev/null\nsleep 3\n").unwrap();
     fixture.run_job(&run).await;
     let outcome = fixture.db.run(&run.id).unwrap();
@@ -855,13 +1051,17 @@ async fn job_timeout_overrides_the_default_for_postrun() {
 }
 
 #[test]
-fn status_reports_the_default_provider_and_native_defaults() {
+fn status_reports_the_workspace_provider_and_native_defaults() {
     let fixture = Fixture::new(false);
     let mut config = fixture.loaded.config.clone();
-    config.slack.dm_users = vec!["U1".into()];
     let slack = Slack::new(&config.slack, &Tokens::default()).unwrap();
     let status = |config: &Config, ts: &str| {
-        let payload = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":"D1","channel_type":"im","user":"U1","ts":ts,"text":"!status"}});
+        let user = if ts.ends_with("3.000001") {
+            "UACME"
+        } else {
+            "U1"
+        };
+        let payload = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":format!("D{user}"),"channel_type":"im","user":user,"ts":ts,"text":"!status"}});
         accept_event(&fixture.db, &slack, config, "UBOT", &payload).unwrap();
         fixture
             .db
@@ -873,10 +1073,79 @@ fn status_reports_the_default_provider_and_native_defaults() {
     };
     let text = status(&config, "1700000001.000001");
     assert!(
-        text.contains("Enso: main (claude / native default / native default)"),
+        text.contains(
+            "Enso: main (claude / native default / native default)\\nWorkspace: main\\nRunning: 0 · queued: 0\\nSession: not started"
+        ),
+        "{text}"
+    );
+    let text = status(&config, "1700000003.000001");
+    assert!(
+        text.contains("Enso: opus (claude / opus / low)\\nWorkspace: acme"),
         "{text}"
     );
     config.defaults.provider = "opus".into();
     let text = status(&config, "1700000002.000001");
-    assert!(text.contains("Enso: opus (claude / opus / low)"), "{text}");
+    assert!(
+        text.contains("Enso: opus (claude / opus / low)\\nWorkspace: main"),
+        "{text}"
+    );
+}
+
+#[test]
+fn admission_applies_the_configured_default_mention_mode() {
+    let fixture = Fixture::new(false);
+    let mut config = fixture.loaded.config.clone();
+    config.slack.channels.insert(
+        "C1".into(),
+        crate::config::ChannelRoute::Workspace("main".into()),
+    );
+    let slack = Slack::new(&config.slack, &Tokens::default()).unwrap();
+    let payload = |ts: &str| json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":"C1","channel_type":"channel","user":"U1","ts":ts,"text":"hello"}});
+    accept_event(
+        &fixture.db,
+        &slack,
+        &config,
+        "UBOT",
+        &payload("1700000001.000001"),
+    )
+    .unwrap();
+    assert!(fixture.db.claim().unwrap().is_none());
+    config.defaults.mention = crate::config::Mention::Never;
+    accept_event(
+        &fixture.db,
+        &slack,
+        &config,
+        "UBOT",
+        &payload("1700000002.000001"),
+    )
+    .unwrap();
+    assert!(fixture.db.claim().unwrap().is_some());
+}
+
+#[test]
+fn unconfigured_and_unrouted_events_are_not_admitted() {
+    let fixture = Fixture::new(false);
+    for (channel, user, text) in [
+        ("DOTHER", "UOTHER", "hello"),
+        ("COTHER", "U1", "<@UBOT> hello"),
+        ("COTHER", "U1", "hello"),
+    ] {
+        let payload = json!({"event_id":"Ev1","event":{"type":"message","channel":channel,"user":user,"ts":"1700000001.000001","text":text}});
+        accept_event(
+            &fixture.db,
+            &fixture.slack,
+            &fixture.loaded.config,
+            "UBOT",
+            &payload,
+        )
+        .unwrap();
+    }
+    assert!(fixture.db.claim().unwrap().is_none());
+    assert!(fixture.db.claim_delivery().unwrap().is_none());
+    assert!(
+        !fixture
+            .db
+            .participated("COTHER", "1700000001.000001")
+            .unwrap()
+    );
 }

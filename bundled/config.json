@@ -5,9 +5,11 @@
   "providers": {
     "main": { "cli": "", "model": "", "effort": "" }
   },
+  "workspaces": {
+    "main": { "path": "${ENSO_HOME}/workspace" }
+  },
   "slack": {
-    "dm_users": [],
-    "channels": {},
-    "mentions": { "top_level": true, "thread": true }
+    "dms": {},
+    "channels": {}
   }
 }

@@ -1,5 +1,5 @@
 BEGIN;
-CREATE TABLE conversations(id TEXT PRIMARY KEY, channel TEXT NOT NULL, thread TEXT NOT NULL DEFAULT '',kind TEXT NOT NULL,provider TEXT,session_id TEXT,UNIQUE(channel,thread));
+CREATE TABLE conversations(id TEXT PRIMARY KEY, channel TEXT NOT NULL, thread TEXT NOT NULL DEFAULT '',kind TEXT NOT NULL,cli TEXT,workspace TEXT,session_id TEXT,UNIQUE(channel,thread));
 CREATE TABLE runs(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('chat','job')),conversation_id TEXT REFERENCES conversations(id),job_name TEXT,trigger TEXT NOT NULL,occurrence TEXT,request TEXT NOT NULL,resolved_prompt TEXT,context TEXT,settings TEXT,state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled','timed_out','interrupted','skipped')),created_at INTEGER NOT NULL,started_at INTEGER,finished_at INTEGER,result TEXT,error TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,UNIQUE(job_name,occurrence));
 CREATE INDEX runs_queue ON runs(state,created_at);
 CREATE TABLE messages(id TEXT PRIMARY KEY,direction TEXT NOT NULL CHECK(direction IN ('in','out')),conversation_id TEXT REFERENCES conversations(id),run_id TEXT REFERENCES runs(id),channel TEXT NOT NULL,thread TEXT NOT NULL DEFAULT '',slack_ts TEXT,remote_id TEXT,event_key TEXT UNIQUE,body TEXT NOT NULL,payload TEXT NOT NULL,file_path TEXT,state TEXT NOT NULL,error TEXT,background INTEGER NOT NULL DEFAULT 0,context_run_id TEXT REFERENCES runs(id),created_at INTEGER NOT NULL,sent_at INTEGER);
@@ -8,5 +8,5 @@ CREATE INDEX messages_context ON messages(channel,thread,background,context_run_
 CREATE TABLE attachments(id INTEGER PRIMARY KEY,message_id TEXT NOT NULL REFERENCES messages(id),name TEXT NOT NULL,path TEXT NOT NULL,media_type TEXT);
 CREATE TABLE job_state(name TEXT PRIMARY KEY,last_tick TEXT NOT NULL);
 CREATE TABLE runtime(singleton INTEGER PRIMARY KEY CHECK(singleton=1),pid INTEGER NOT NULL,heartbeat INTEGER NOT NULL,slack_state TEXT NOT NULL,error TEXT);
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 COMMIT;

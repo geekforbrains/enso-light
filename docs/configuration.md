@@ -20,10 +20,11 @@ The default home is `~/.enso`; `--home PATH` selects another home.
 ```
 
 `enso init` creates missing directories and starter files without overwriting
-existing content. Credentials and generated files use private permissions. All
-agent processes run in `workspace/`; job hooks run in their job's directory.
-`skills/` holds agent skills; Claude Code and Codex find them through the
-workspace links. Add your own skills beside `enso`.
+existing content. Credentials and generated files use private permissions. Each
+agent process runs in its [workspace](#workspaces)'s directory; job hooks run in
+their job's directory. The starter `main` workspace is `workspace/`. `skills/`
+holds agent skills; Claude Code and Codex find them through the workspace links.
+Add your own skills beside `enso`.
 
 ## config.json
 
@@ -31,6 +32,7 @@ workspace links. Add your own skills beside `enso`.
 {
   "defaults": {
     "provider": "main",
+    "mention": "always",
     "timeout_seconds": 1800
   },
   "providers": {
@@ -38,10 +40,16 @@ workspace links. Add your own skills beside `enso`.
     "opus": { "cli": "claude", "model": "opus", "effort": "high", "args": ["--dangerously-skip-permissions"] },
     "codex": { "cli": "codex", "executable": "${ENSO_HOME}/bin/codex" }
   },
+  "workspaces": {
+    "main": { "path": "${ENSO_HOME}/workspace" },
+    "acme": { "path": "${HOME}/Projects/acme", "provider": "codex" }
+  },
   "slack": {
-    "dm_users": ["U012345"],
-    "channels": {},
-    "mentions": { "top_level": true, "thread": true }
+    "dms": { "U012345": "main" },
+    "channels": {
+      "C012345": "acme",
+      "C067890": { "workspace": "acme", "mention": "first" }
+    }
   }
 }
 ```
@@ -55,7 +63,8 @@ instead of being misread.
 
 | Field | Default | Overridden by |
 |---|---|---|
-| `provider` | required; must name a provider | job `provider` |
+| `provider` | required; must name a provider | workspace `provider`, then job `provider` |
+| `mention` | `always`; see [mention modes](#mention-modes) | channel `mention` |
 | `timeout_seconds` | `1800`; must be greater than zero | job `timeout_seconds` |
 
 The timeout applies to each process separately: every agent attempt, prerun,
@@ -64,8 +73,8 @@ whichever is shorter.
 
 ### providers
 
-Each provider is a named agent CLI setup; define at least one. Conversations use
-`defaults.provider`, and a job can choose another by name.
+Each provider is a named agent CLI setup; define at least one. A run uses its
+job's `provider`, else its workspace's `provider`, else `defaults.provider`.
 
 | Field | Purpose |
 |---|---|
@@ -81,23 +90,63 @@ already be authenticated; configure its permissions for unattended operation
 through native settings or explicit `args`. Enso does not manage provider
 credentials.
 
+### workspaces
+
+Each workspace is a named directory where agents run; define at least one.
+Names use letters, numbers, hyphens, and underscores.
+
+| Field | Purpose |
+|---|---|
+| `path` | Required absolute directory, after `${NAME}` substitution. Use `${ENSO_HOME}/...` for a directory inside the Enso home. |
+| `provider` | Optional provider name for runs in this workspace; blank or left out uses `defaults.provider` |
+
+Two workspaces may share a path, for example to use one repository with
+different providers. The directory must exist when a run starts; otherwise the
+run fails. Each run sets `ENSO_WORKSPACE` to the absolute path, and incoming
+attachments go to `uploads/<run-id>/` inside it, readable only by the Enso
+user.
+
 ### slack
 
-Slack accepts DMs only from `dm_users`, and channels only when their IDs appear in
-`channels`. Empty allowlists accept nothing. Add a channel with its mention rules:
+`dms` and `channels` route conversations to workspaces. Enso ignores
+conversations they do not route.
 
 ```json
-"channels": {
-  "C012345": { "top_level": true, "thread": false }
+"slack": {
+  "dms": { "U012345": "main", "*": "main" },
+  "channels": {
+    "C012345": "acme",
+    "C067890": { "workspace": "acme", "mention": "first" },
+    "*": "main"
+  }
 }
 ```
 
-Omitted per-channel mention fields inherit `slack.mentions`, whose defaults
-require mentions at both levels.
+- `dms` maps a Slack user ID (`U…` or `W…`) to a workspace name. DMs never need
+  mentions.
+- `channels` maps a channel ID (`C…` or `G…`) to a workspace name, or to an
+  object with `workspace` and an optional `mention` mode that replaces
+  `defaults.mention`.
+- `"*"` matches any user or channel not listed; an exact ID wins over `"*"`.
+- Every named workspace must exist. Empty `dms` and `channels` route nothing.
 
-When thread mentions are disabled, unmentioned replies are accepted only in a
-thread the bot has already joined. DMs never need mentions. A DM and all its
-threads share a native session; each channel thread has its own session.
+`"*"` lets anyone who can reach the bot use it: any member who can DM the app,
+or any channel it is invited to, runs agents with your CLI's permissions in that
+workspace. Prefer explicit IDs. To find your user ID, open your Slack profile
+and choose **Copy member ID**.
+
+A DM and all its threads share a native session; each channel thread has its own
+session.
+
+#### Mention modes
+
+| Mode | Top-level messages | Thread replies |
+|---|---|---|
+| `always` | Need a mention | Need a mention |
+| `first` | Need a mention | Need none in a thread the bot already joined |
+| `never` | Need none | Need none in a thread the bot already joined |
+
+Other thread replies need a mention.
 
 Other optional Slack settings:
 
@@ -165,8 +214,8 @@ successful Slack connection.
 
 The [Slack CLI commands](cli.md#slack-lookup-and-reactions) use the bot token for
 channel/user lookup, history, threads, links, and reactions, so they need the
-matching scopes above and access to the conversation. Incoming `dm_users` and
-`channels` settings control which messages start agent turns; they do not
+matching scopes above and access to the conversation. Incoming `dms` and
+`channels` routes control which messages start agent turns; they do not
 restrict direct Web API lookups or reactions.
 
 ## Workspace search

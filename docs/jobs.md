@@ -3,7 +3,7 @@
 Each job is a directory at `~/.enso/jobs/NAME/`:
 
 ```text
-job.json       # scheduling, provider, timeout, and notification
+job.json       # workspace, scheduling, provider, timeout, and notification
 prompt.md      # required user message
 prerun.sh      # optional
 postrun.sh     # optional
@@ -15,6 +15,7 @@ Names use letters, numbers, hyphens, and underscores. `prompt.md` must be nonemp
 {
   "enabled": true,
   "cron": "0 9 * * 1-5",
+  "workspace": "main",
   "provider": "opus",
   "timeout_seconds": 600,
   "notify": { "channel": "D012345" },
@@ -28,12 +29,16 @@ Add `"thread": "1700000000.000001"` with a root message timestamp to post in tha
 thread. Enso checks the format when it loads the job; the bot must be able to post
 there. Leave it out for a job that never posts.
 
+`workspace` is required and names one of the configured
+[workspaces](configuration.md#workspaces); the agent runs in its directory.
 `provider` optionally names one of the configured
-[providers](configuration.md#providers); without it the job uses
-`defaults.provider`. `timeout_seconds` optionally replaces
-`defaults.timeout_seconds` (greater than zero) for each of the job's processes:
-every agent attempt, prerun, and postrun. Enso rejects a job that names an
-unknown provider when it loads the job.
+[providers](configuration.md#providers); without it the job uses the
+workspace's `provider`, then `defaults.provider`. `timeout_seconds` optionally
+replaces `defaults.timeout_seconds` (greater than zero) for each of the job's
+processes: every agent attempt, prerun, and postrun. Enso rejects a job that
+leaves out `workspace` or names an unknown workspace or provider when it loads
+the job: in `enso config check`, at service start, in the scheduler, in
+`enso jobs list` and `enso jobs run`, and at run start.
 
 `retries` is how many extra attempts postrun may request in one run (default 0,
 at most 10). See [Postrun and retries](#postrun-and-retries).
@@ -74,8 +79,8 @@ its destination.
 ## Hooks and variables
 
 Existing hooks run automatically with Bash; they do not need executable bits.
-Both hooks run in the job directory, with the Enso environment. Send diagnostics
-to stderr. Prerun stdout is empty or a JSON object:
+Both hooks run in the job directory, not the workspace, with the Enso
+environment. Send diagnostics to stderr. Prerun stdout is empty or a JSON object:
 
 ```json
 {"vars":{"DATE":"2026-10-06","COUNT":3}}
@@ -96,16 +101,17 @@ and postrun from running. Prerun receives the run's context JSON on stdin and
 runs once per run. Timeouts and cancellation stop a hook's process group. Hook
 failure is visible in the job's outcome.
 
-Enso sets `ENSO_HOME`, `ENSO_RUN_ID`, `ENSO_SOURCE`, and `ENSO_JOB` for the agent
-and hooks. `ENSO_CHANNEL` and `ENSO_THREAD_TS` provide the Slack conversation or
-the job's `notify` destination, and are empty without one.
+Enso sets `ENSO_HOME`, `ENSO_WORKSPACE` (the workspace's absolute path),
+`ENSO_RUN_ID`, `ENSO_SOURCE`, and `ENSO_JOB` for the agent and hooks.
+`ENSO_CHANNEL` and `ENSO_THREAD_TS` provide the Slack conversation or the job's
+`notify` destination, and are empty without one.
 `ENSO_SOURCE` is `slack` or `job`; `ENSO_JOB` is empty on Slack turns. Enso owns
 these metadata variables and overrides conflicting values from the inherited
 environment or `.env`.
 
 Job turns get separate guidance and metadata identifying the job, provider,
-trigger, scheduled time, workspace, and notification destination. They never
-inherit a Slack sender's identity or a chat session.
+trigger, scheduled time, workspace name and path, and notification destination.
+They never inherit a Slack sender's identity or a chat session.
 
 ### Postrun and retries
 

@@ -35,7 +35,16 @@ pub struct Run {
     pub created_at: i64,
     pub input: Value,
     pub session: Option<String>,
-    pub provider: Option<String>,
+    /// The CLI and workspace path that own `session`.
+    pub cli: Option<String>,
+    pub workspace: Option<String>,
+}
+/// A native session and the CLI and workspace path it belongs to.
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub id: String,
+    pub cli: String,
+    pub workspace: String,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Delivery {
@@ -58,15 +67,18 @@ impl Db {
         };
         let c = db.connect()?;
         let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version == 0 {
-            let count:i64=c.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0))?;
-            ensure!(
-                count == 0,
-                "Existing enso.db belongs to another version; back up the home before initializing mini Enso"
-            );
+        let count: i64 = c.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )?;
+        if version == 0 && count == 0 {
             c.execute_batch(include_str!("schema.sql"))?;
         } else {
-            ensure!(version == 1, "Unsupported Enso database version {version}");
+            ensure!(
+                version == 2,
+                "enso.db uses schema {version}; Enso 0.2.0 needs a new database. Move enso.db and its -wal/-shm files aside (see the 0.2.0 changelog)."
+            );
         }
         fs::set_permissions(&db.path, fs::Permissions::from_mode(0o600))?;
         Ok(db)
@@ -197,7 +209,7 @@ impl Db {
     pub fn claim(&self) -> Result<Option<Run>> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let run=tx.query_row("SELECT r.id,r.kind,r.conversation_id,r.job_name,r.trigger,r.request,r.created_at,coalesce(m.payload,'{}'),c.session_id,c.provider,r.occurrence FROM runs r LEFT JOIN conversations c ON c.id=r.conversation_id LEFT JOIN messages m ON m.run_id=r.id AND m.direction='in' WHERE r.state='queued' AND NOT EXISTS(SELECT 1 FROM runs active WHERE active.state='running' AND ((active.conversation_id IS NOT NULL AND active.conversation_id=r.conversation_id) OR (active.job_name IS NOT NULL AND active.job_name=r.job_name))) ORDER BY r.created_at,r.rowid LIMIT 1",[],|r|Ok(Run{id:r.get(0)?,kind:r.get(1)?,conversation:r.get(2)?,job:r.get(3)?,trigger:r.get(4)?,request:r.get(5)?,created_at:r.get(6)?,input:serde_json::from_str(&r.get::<_,String>(7)?).unwrap_or(Value::Null),session:r.get(8)?,provider:r.get(9)?,occurrence:r.get(10)?})).optional()?;
+        let run=tx.query_row("SELECT r.id,r.kind,r.conversation_id,r.job_name,r.trigger,r.request,r.created_at,coalesce(m.payload,'{}'),c.session_id,c.cli,c.workspace,r.occurrence FROM runs r LEFT JOIN conversations c ON c.id=r.conversation_id LEFT JOIN messages m ON m.run_id=r.id AND m.direction='in' WHERE r.state='queued' AND NOT EXISTS(SELECT 1 FROM runs active WHERE active.state='running' AND ((active.conversation_id IS NOT NULL AND active.conversation_id=r.conversation_id) OR (active.job_name IS NOT NULL AND active.job_name=r.job_name))) ORDER BY r.created_at,r.rowid LIMIT 1",[],|r|Ok(Run{id:r.get(0)?,kind:r.get(1)?,conversation:r.get(2)?,job:r.get(3)?,trigger:r.get(4)?,request:r.get(5)?,created_at:r.get(6)?,input:serde_json::from_str(&r.get::<_,String>(7)?).unwrap_or(Value::Null),session:r.get(8)?,cli:r.get(9)?,workspace:r.get(10)?,occurrence:r.get(11)?})).optional()?;
         if let Some(r) = &run {
             tx.execute(
                 "UPDATE runs SET state='running',started_at=?2 WHERE id=?1",
@@ -234,8 +246,7 @@ impl Db {
         state: &str,
         result: &str,
         error: Option<&str>,
-        session: Option<&str>,
-        provider: &str,
+        session: Option<&Session>,
     ) -> Result<()> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -244,7 +255,7 @@ impl Db {
             params![run, state, result, error, now()],
         )?;
         if let Some(session) = session {
-            tx.execute("UPDATE conversations SET session_id=?2,provider=?3 WHERE id=(SELECT conversation_id FROM runs WHERE id=?1)",params![run,session,provider])?;
+            tx.execute("UPDATE conversations SET session_id=?2,cli=?3,workspace=?4 WHERE id=(SELECT conversation_id FROM runs WHERE id=?1)",params![run,session.id,session.cli,session.workspace])?;
         }
         tx.execute("UPDATE messages SET context_run_id=?1 WHERE run_id=?1 AND direction='out' AND EXISTS(SELECT 1 FROM runs r JOIN conversations c ON c.id=r.conversation_id WHERE r.id=?1 AND r.kind='chat' AND c.channel=messages.channel AND (c.kind IN ('dm','im') OR coalesce(nullif(messages.thread,''),messages.slack_ts)=c.thread))",[run])?;
         if state == "succeeded" {
@@ -282,7 +293,7 @@ impl Db {
             "Conversation is busy. Use !stop or wait before !clear."
         );
         tx.execute(
-            "UPDATE conversations SET session_id=NULL,provider=NULL WHERE id=?1",
+            "UPDATE conversations SET session_id=NULL,cli=NULL,workspace=NULL WHERE id=?1",
             [conversation],
         )?;
         tx.commit()?;
@@ -290,11 +301,12 @@ impl Db {
     }
     pub fn conversation_status(&self, conversation: &str) -> Result<Value> {
         let c = self.connect()?;
-        let (provider, session): (Option<String>, Option<String>) = c.query_row(
-            "SELECT provider,session_id FROM conversations WHERE id=?1",
-            [conversation],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (cli, workspace, session): (Option<String>, Option<String>, Option<String>) = c
+            .query_row(
+                "SELECT cli,workspace,session_id FROM conversations WHERE id=?1",
+                [conversation],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
         let mut stmt=c.prepare("SELECT state,count(*) FROM runs WHERE conversation_id=?1 AND state IN ('queued','running') GROUP BY state")?;
         let counts = stmt
             .query_map([conversation], |r| {
@@ -302,7 +314,7 @@ impl Db {
             })?
             .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
         Ok(
-            json!({"conversation":conversation,"provider":provider,"has_session":session.is_some(),"running":counts.get("running").unwrap_or(&0),"queued":counts.get("queued").unwrap_or(&0)}),
+            json!({"conversation":conversation,"cli":cli,"workspace":workspace,"has_session":session.is_some(),"running":counts.get("running").unwrap_or(&0),"queued":counts.get("queued").unwrap_or(&0)}),
         )
     }
     pub fn run(&self, run: &str) -> Result<Value> {

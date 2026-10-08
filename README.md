@@ -1,22 +1,23 @@
 # Enso
 
 A small Rust service that connects Slack to an installed Claude Code or Codex CLI,
-plus scheduled jobs using the same runner. One binary, one shared workspace, and
-one SQLite database. Native CLIs keep their own authentication and sessions.
+plus scheduled jobs using the same runner. One binary, named workspaces, and one
+SQLite database. Native CLIs keep their own authentication and sessions.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/geekforbrains/enso-light/releases/latest/download/enso-installer.sh | sh
 enso init
-# Set providers.main.cli and permitted Slack users in config.json,
-# and the Slack tokens in ~/.enso/.env.
+# Set providers.main.cli and route your Slack user ID to a workspace in
+# slack.dms in config.json, and set the Slack tokens in ~/.enso/.env.
 enso config check
 enso service install
 enso service start
 ```
 
-Start with one permitted DM user. Enso accepts no conversations until you configure
-the allowlist. Each DM shares one session across its threads; channel threads get
-separate sessions. Messages in a busy conversation queue behind its current turn.
+Start by routing your own DMs: `"dms": {"U012345": "main"}`. Enso ignores
+conversations that `slack.dms` and `slack.channels` do not route to a workspace;
+each workspace is a directory where its conversations and jobs run. Each DM
+shares one session across its threads; channel threads get separate sessions. Messages in a busy conversation queue behind its current turn.
 Different jobs and conversations run in parallel with no global concurrency limit
 or setting. Scheduled occurrences of an already busy job are skipped.
 Slack controls: `!clear`, `!stop`, `!status`, and `!help`.
