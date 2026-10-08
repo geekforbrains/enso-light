@@ -30,6 +30,16 @@ Versioning and publication follow the [release flow](docs/releases.md).
   the text with `slack.unconfigured_message`, or set it to `""` to stay silent.
   See
   [unconfigured conversations](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#unconfigured-conversations).
+- The Enso home is a git repository with a shared `AGENTS.md` and
+  `.agents/skills/` for every workspace inside it (`CLAUDE.md` and
+  `.claude/skills` link to them), and a `.gitignore` for secrets and runtime
+  state. `enso init` runs `git init` and warns instead of failing when git is
+  unavailable; Codex needs the repository to load the shared layer. See
+  [instructions and skills](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#instructions-and-skills).
+- `enso init` and service startup create each missing workspace directory with
+  a starter `AGENTS.md`, `CLAUDE.md` link, and `.agents/skills/`. Existing
+  directories are left untouched. See
+  [workspace scaffolding](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#workspace-scaffolding).
 
 ### Changed
 
@@ -55,12 +65,40 @@ Versioning and publication follow the [release flow](docs/releases.md).
   `enso.db-shm` files aside (for example `mkdir 0.1 && mv enso.db* 0.1/`), and
   start again. Conversations start fresh sessions, and old run history stays
   in the moved files.
+- **Breaking:** Claude Code runs pass `--setting-sources project,local`, so
+  they no longer load your personal `~/.claude` settings, skills, plugins, or
+  `CLAUDE.md`. Grant unattended permissions in provider `args` (for example
+  `"args": ["--dangerously-skip-permissions"]`) or a workspace's
+  `.claude/settings.json`, and move personal skills Enso needs into
+  `~/.enso/.agents/skills/`. The `env` block and `apiKeyHelper` in
+  `~/.claude/settings.json` no longer apply either; move variables such as
+  `ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_BEDROCK` into `~/.enso/.env` or a
+  workspace's `.claude/settings.json`.
+- **Breaking:** the home layout moves `skills/` to `.agents/skills/` and the
+  starter workspace from `workspace/` to `workspaces/main/`, whose old
+  `AGENTS.md` is replaced by the shared `~/.enso/AGENTS.md`. Stop the service,
+  set `workspaces.main.path` to `${ENSO_HOME}/workspaces/main` in
+  `config.json`, then run:
+
+  ```sh
+  cd ~/.enso && mkdir -p .agents workspaces
+  mv skills .agents/skills && mv workspace workspaces/main
+  mv workspaces/main/AGENTS.md AGENTS.md.0.1
+  rm .agents/skills/enso/SKILL.md
+  rm workspaces/main/CLAUDE.md workspaces/main/.agents/skills workspaces/main/.claude/skills
+  enso init
+  ```
+
+  `enso init` writes the 0.2.0 `AGENTS.md` and `enso` skill, which describe
+  per-workspace runs and the new job fields. Copy any personal edits from
+  `AGENTS.md.0.1` into `AGENTS.md`, then delete `AGENTS.md.0.1`. If you edited
+  the old `enso` skill, keep those edits in a separate skill.
 
 ### Removed
 
 - **Breaking:** `slack.dm_users`, `slack.mentions`, and per-channel
   `top_level`/`thread` rules. Rewrite them as routes: add the
-  `workspaces` entry `"main": {"path": "${ENSO_HOME}/workspace"}`, replace
+  `workspaces` entry `"main": {"path": "${ENSO_HOME}/workspaces/main"}`, replace
   `"dm_users": ["U012345"]` with `"dms": {"U012345": "main"}`, and replace each
   channel entry with `"C012345": "main"` or
   `"C012345": {"workspace": "main", "mention": "first"}`. Mention rules map as

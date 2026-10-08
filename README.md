@@ -7,18 +7,25 @@ SQLite database. Native CLIs keep their own authentication and sessions.
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/geekforbrains/enso-light/releases/latest/download/enso-installer.sh | sh
 enso init
-# Set providers.main.cli and route your Slack user ID to a workspace in
-# slack.dms in config.json, and set the Slack tokens in ~/.enso/.env.
+# Set providers.main.cli in ~/.enso/config.json and the Slack tokens in ~/.enso/.env.
 enso config check
 enso service install
 enso service start
 ```
 
-Start by routing your own DMs: `"dms": {"U012345": "main"}`. To learn your
-user ID, DM the bot: Enso runs nothing for a DM that `slack.dms` does not route
-(or an @mention in an unrouted channel) and replies with the ID to add.
-Each workspace is a directory where its conversations and jobs run. Each DM
-shares one session across its threads; channel threads get separate sessions. Messages in a busy conversation queue behind its current turn.
+Then DM the bot. Enso runs nothing for a DM that `slack.dms` does not route and
+replies with your user ID; add it as `"dms": {"U012345": "main"}` in
+`config.json` and run `enso service restart`.
+
+`~/.enso` is a git repository whose `AGENTS.md` and `.agents/skills/` are shared
+by every workspace inside it. Each workspace is a directory where its
+conversations and jobs run, with its own `AGENTS.md` and skills; the starter is
+`~/.enso/workspaces/main`. Claude Code runs ignore your personal `~/.claude`
+configuration, so grant permissions in provider `args`. See
+[configuration](docs/configuration.md#instructions-and-skills).
+
+Each DM shares one session across its threads; channel threads get separate
+sessions. Messages in a busy conversation queue behind its current turn.
 Different jobs and conversations run in parallel with no global concurrency limit
 or setting. Scheduled occurrences of an already busy job are skipped.
 Slack controls: `!clear`, `!stop`, `!status`, and `!help`.
@@ -34,8 +41,9 @@ directly; outgoing messages use `enso message send` for tracked delivery.
 - [Changelog](CHANGELOG.md)
 - [Release flow](docs/releases.md)
 
-Requires an authenticated agent CLI, Bash for job hooks, and macOS or Linux on
-ARM64 or x86-64. Service installation uses your user's launchd or systemd manager.
+Requires an authenticated agent CLI, Bash for job hooks, git (Codex needs it for
+the shared instructions and skills), and macOS or Linux on ARM64 or x86-64.
+Service installation uses your user's launchd or systemd manager.
 The installer places Enso in `~/.local/bin`; follow its PATH instructions if needed.
 To build from source, install Rust and run `cargo install --locked --path .`.
 

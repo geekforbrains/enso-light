@@ -67,7 +67,7 @@ impl Fixture {
                     "opus": {"cli": "claude", "executable": executable, "model": "opus", "effort": "low", "args": ["--opus"]}
                 },
                 "workspaces": {
-                    "main": {"path": "${ENSO_HOME}/workspace"},
+                    "main": {"path": "${ENSO_HOME}/workspaces/main"},
                     "acme": {"path": "${ENSO_HOME}/acme", "provider": "opus"}
                 },
                 "slack": {"dms": {"U1": "main", "UACME": "acme"}}
@@ -77,6 +77,7 @@ impl Fixture {
         .unwrap();
         let loaded = config::load(home.path()).unwrap();
         loaded.validate().unwrap();
+        config::scaffold(&loaded.config).unwrap();
         let db = Db::open(home.path()).unwrap();
         let slack = Slack::new(&loaded.config.slack, &loaded.tokens).unwrap();
         Self {
@@ -120,7 +121,7 @@ impl Fixture {
     }
 
     fn captured(&self, prefix: &str, run: &Run) -> String {
-        self.captured_in("workspace", prefix, run)
+        self.captured_in("workspaces/main", prefix, run)
     }
 
     fn captured_in(&self, workspace: &str, prefix: &str, run: &Run) -> String {
@@ -232,7 +233,7 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     assert!(settings["model"].is_null() && settings["effort"].is_null());
     assert_eq!(settings["args"], json!([]));
     assert_eq!(settings["timeout_seconds"], 5);
-    let workspace = fixture.workspace("workspace");
+    let workspace = fixture.workspace("workspaces/main");
     let expected_workspace = json!({"name":"main","path":workspace});
     assert_eq!(settings["workspace"], expected_workspace);
     assert_eq!(header["provider"], "main");
@@ -316,7 +317,7 @@ async fn prerun_skip_does_not_invoke_provider_postrun_or_prompt_interpolation() 
 }
 
 /// Saves each attempt's postrun input, agent prompt and agent arguments as `*-N`.
-const RECORDING_POSTRUN: &str = "set -eu\nn=$(($(cat attempts 2>/dev/null || echo 0) + 1))\necho \"$n\" > attempts\ncat > \"post-$n.json\"\ncp \"$ENSO_HOME/workspace/input-$ENSO_RUN_ID.txt\" \"input-$n.txt\"\ncp \"$ENSO_HOME/workspace/args-$ENSO_RUN_ID.txt\" \"args-$n.txt\"\n";
+const RECORDING_POSTRUN: &str = "set -eu\nn=$(($(cat attempts 2>/dev/null || echo 0) + 1))\necho \"$n\" > attempts\ncat > \"post-$n.json\"\ncp \"$ENSO_WORKSPACE/input-$ENSO_RUN_ID.txt\" \"input-$n.txt\"\ncp \"$ENSO_WORKSPACE/args-$ENSO_RUN_ID.txt\" \"args-$n.txt\"\n";
 
 fn retrying_job(fixture: &Fixture, name: &str, definition: &str, postrun: &str) -> (Run, PathBuf) {
     let (run, directory) = fixture.job(
@@ -598,7 +599,7 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     let session = completion.3.unwrap();
     assert_eq!(session.id, SESSION);
     assert_eq!(session.cli, "claude");
-    assert_eq!(session.workspace, fixture.workspace("workspace"));
+    assert_eq!(session.workspace, fixture.workspace("workspaces/main"));
     let (prompt, header, _) = fixture.snapshot(&run);
     assert_eq!(prompt, fixture.captured("input", &run));
     assert!(prompt.contains("You are Enso, a personal assistant reached through Slack."));
@@ -615,20 +616,20 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(header["background_ids"], json!([first_background]));
     assert_eq!(
         header["workspace"],
-        json!({"name":"main","path":fixture.workspace("workspace")})
+        json!({"name":"main","path":fixture.workspace("workspaces/main")})
     );
     assert_eq!(
         fixture.captured("env", &run),
         format!(
             "available-from-dotenv\nslack\n\nDCHAT\n\n{}\n",
-            fixture.workspace("workspace")
+            fixture.workspace("workspaces/main")
         )
     );
     assert!(
         !fixture
             .home
             .path()
-            .join("workspace/uploads")
+            .join("workspaces/main/uploads")
             .join(&run.id)
             .exists()
     );
@@ -702,7 +703,7 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
         fixture.captured("env", &resumed),
         format!(
             "available-from-dotenv\nslack\n\nDCHAT\n1700000001.000001\n{}\n",
-            fixture.workspace("workspace")
+            fixture.workspace("workspaces/main")
         )
     );
     let args = fixture.captured("args", &resumed);
@@ -730,7 +731,7 @@ async fn resumable(fixture: &Fixture) -> (Incoming, Run, String) {
     assert_eq!(resumed.cli.as_deref(), Some("claude"));
     assert_eq!(
         resumed.workspace.as_deref(),
-        Some(fixture.workspace("workspace").as_str())
+        Some(fixture.workspace("workspaces/main").as_str())
     );
     (second, resumed, accepted.conversation_id)
 }
@@ -752,7 +753,7 @@ async fn resume_error(fixture: &Fixture, loaded: &Loaded, run: &Run, input: &Inc
         !fixture
             .home
             .path()
-            .join("workspace")
+            .join("workspaces/main")
             .join(format!("input-{}.txt", run.id))
             .exists()
     );
@@ -840,7 +841,7 @@ async fn chat_runs_in_the_routed_workspace_with_its_provider() {
         !fixture
             .home
             .path()
-            .join("workspace/uploads")
+            .join("workspaces/main/uploads")
             .join(&run.id)
             .exists()
     );
@@ -908,8 +909,8 @@ async fn attachment_download_uses_the_resolved_timeout() {
     assert!(started.elapsed() < Duration::from_secs(4));
     assert!(!fixture.home.path().join("provider-ran").exists());
     for path in [
-        "workspace/uploads".to_owned(),
-        format!("workspace/uploads/{}", run.id),
+        "workspaces/main/uploads".to_owned(),
+        format!("workspaces/main/uploads/{}", run.id),
     ] {
         let mode = fs::metadata(fixture.home.path().join(path))
             .unwrap()

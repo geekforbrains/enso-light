@@ -47,7 +47,7 @@ fn configured_home() -> tempfile::TempDir {
         json!({
             "defaults":{"provider":"main"},
             "providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}},
-            "workspaces":{"main":{"path":"${ENSO_HOME}/workspace"}},
+            "workspaces":{"main":{"path":"${ENSO_HOME}/workspaces/main"}},
             "slack":{"dms":{"U012345":"main"}}
         })
         .to_string(),
@@ -132,53 +132,151 @@ fn add_job(home: &Path, name: &str, definition: Value) {
 }
 
 #[test]
-fn init_creates_guidance_and_database_without_overwriting_local_content() {
-    let directory = configured_home();
+fn init_creates_a_git_home_with_shared_guidance_and_a_scaffolded_workspace() {
+    let directory = tempfile::tempdir().unwrap();
     let home = directory.path();
+    let output = successful(enso(home, &["init"]));
+    assert_eq!(output["warnings"], json!([]));
+    assert_eq!(
+        output["workspaces_created"],
+        json!([home.join("workspaces/main")])
+    );
+    assert_eq!(
+        output["next"],
+        "Set providers.main.cli and the Slack tokens in .env, then run enso config check."
+    );
     for name in [
         "enso.db",
         "config.json",
         ".env",
-        "workspace/AGENTS.md",
-        "skills/enso/SKILL.md",
+        ".gitignore",
+        "AGENTS.md",
+        ".agents/skills/enso/SKILL.md",
+        "workspaces/main/AGENTS.md",
     ] {
         assert!(home.join(name).is_file(), "missing {name}");
     }
-    for name in ["jobs", "logs", "workspace/uploads"] {
+    for name in [".git", "jobs", "logs", "workspaces/main/.agents/skills"] {
         assert!(home.join(name).is_dir(), "missing {name}");
     }
-    assert_eq!(
-        fs::read_link(home.join("workspace/CLAUDE.md")).unwrap(),
-        Path::new("AGENTS.md")
-    );
-    for tool in [".agents", ".claude"] {
+    for root in [home.to_path_buf(), home.join("workspaces/main")] {
         assert_eq!(
-            fs::read_link(home.join("workspace").join(tool).join("skills")).unwrap(),
-            Path::new("../../skills")
+            fs::read_link(root.join("CLAUDE.md")).unwrap(),
+            Path::new("AGENTS.md")
+        );
+        assert_eq!(
+            fs::read_link(root.join(".claude/skills")).unwrap(),
+            Path::new("../.agents/skills")
         );
     }
-    let custom_agents = "# Local identity\nKeep this exact text.\n";
-    let custom_skill = "# Local Enso skill\nKeep this exact skill.\n";
-    fs::write(home.join("workspace/AGENTS.md"), custom_agents).unwrap();
-    fs::write(home.join("skills/enso/SKILL.md"), custom_skill).unwrap();
-    fs::write(home.join("workspace/personal.txt"), "Keep personal files.").unwrap();
-    let original_config = fs::read(home.join("config.json")).unwrap();
+    for old in ["skills", "workspace", "workspaces/main/uploads"] {
+        assert!(!home.join(old).exists(), "unexpected {old}");
+    }
+    let custom = [
+        ("AGENTS.md", "# Local identity\nKeep this exact text.\n"),
+        (".gitignore", "custom-ignore\n"),
+        (".agents/skills/enso/SKILL.md", "# Local Enso skill\n"),
+        ("workspaces/main/AGENTS.md", "# Main focus\n"),
+        ("workspaces/main/personal.txt", "Keep personal files."),
+        (
+            "config.json",
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"codex"}},"workspaces":{"main":{"path":"${ENSO_HOME}/workspaces/main"}}}"#,
+        ),
+    ];
+    for (name, content) in custom {
+        fs::write(home.join(name), content).unwrap();
+    }
     let original_env = fs::read(home.join(".env")).unwrap();
-    successful(enso(home, &["init"]));
-    assert_eq!(fs::read(home.join("config.json")).unwrap(), original_config);
+    let again = successful(enso(home, &["init"]));
+    assert_eq!(again["workspaces_created"], json!([]));
+    for (name, content) in custom {
+        assert_eq!(
+            fs::read_to_string(home.join(name)).unwrap(),
+            content,
+            "{name}"
+        );
+    }
     assert_eq!(fs::read(home.join(".env")).unwrap(), original_env);
-    assert_eq!(
-        fs::read_to_string(home.join("workspace/AGENTS.md")).unwrap(),
-        custom_agents
+}
+
+#[test]
+fn init_without_git_warns_that_codex_needs_a_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_enso"))
+        .arg("--home")
+        .arg(directory.path())
+        .args(["--json", "init"])
+        .env("PATH", empty_path.path())
+        .env_remove("ENSO_HOME")
+        .output()
+        .unwrap();
+    let result = successful(output);
+    let warnings = result["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    let warning = warnings[0].as_str().unwrap();
+    assert!(
+        warning.contains("Codex needs the Enso home to be a git repository"),
+        "{warning}"
     );
-    assert_eq!(
-        fs::read_to_string(home.join("skills/enso/SKILL.md")).unwrap(),
-        custom_skill
+    assert!(!directory.path().join(".git").exists());
+    assert!(directory.path().join("workspaces/main/AGENTS.md").is_file());
+}
+
+#[test]
+fn init_creates_the_home_repository_despite_git_location_variables() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let other = directory.path().join("other/.git");
+    let output = Command::new(env!("CARGO_BIN_EXE_enso"))
+        .arg("--home")
+        .arg(&home)
+        .args(["--json", "init"])
+        .env("GIT_DIR", &other)
+        .env("GIT_WORK_TREE", directory.path())
+        .env_remove("ENSO_HOME")
+        .output()
+        .unwrap();
+    assert_eq!(successful(output)["warnings"], json!([]));
+    assert!(home.join(".git").is_dir());
+    assert!(!other.exists());
+}
+
+#[test]
+fn init_creates_the_repository_before_a_failing_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let file = home.join("not-a-directory");
+    fs::write(&file, "").unwrap();
+    fs::write(
+        home.join("config.json"),
+        json!({"defaults":{"provider":"main"},"workspaces":{"main":{"path":file}}}).to_string(),
+    )
+    .unwrap();
+    let result = enso(home, &["init"]);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("exists but is not a directory"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(
-        fs::read_to_string(home.join("workspace/personal.txt")).unwrap(),
-        "Keep personal files."
-    );
+    assert!(home.join(".git").is_dir());
+}
+
+#[test]
+fn init_with_an_invalid_env_writes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join(".env"), "this is not valid").unwrap();
+    let result = enso(directory.path(), &["init"]);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("invalid Enso .env"), "{stderr}");
+    assert!(!stderr.contains("this is not valid"), "{stderr}");
+    let names: Vec<_> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [".env"]);
 }
 
 #[test]
@@ -364,8 +462,9 @@ fn invalid_existing_configuration_is_not_reseeded_by_init() {
         fs::read_to_string(&config_path).unwrap(),
         "old incompatible config"
     );
-    assert!(!directory.path().join("workspace").exists());
-    assert!(!directory.path().join("enso.db").exists());
+    for name in ["workspaces", "AGENTS.md", ".git", "enso.db"] {
+        assert!(!directory.path().join(name).exists(), "{name}");
+    }
 }
 
 #[test]

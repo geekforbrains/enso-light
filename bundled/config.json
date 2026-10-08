@@ -6,7 +6,7 @@
     "main": { "cli": "", "model": "", "effort": "" }
   },
   "workspaces": {
-    "main": { "path": "${ENSO_HOME}/workspace" }
+    "main": { "path": "${ENSO_HOME}/workspaces/main" }
   },
   "slack": {
     "dms": {},

@@ -1,0 +1,7 @@
+# Enso secrets and runtime state
+.env
+enso.db
+enso.db-*
+daemon.lock
+logs/
+workspaces/*/uploads/

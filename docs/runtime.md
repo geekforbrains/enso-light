@@ -11,8 +11,12 @@ conversations, native session references, messages, attachments, run status,
 delivery status, and scheduling cursors. Native CLIs own authentication, tools,
 permissions, and their underlying session files. Each agent runs in a
 configured workspace directory: the workspace a Slack conversation is routed to,
-or the job's `workspace`. Hooks run in their job directory. Incoming attachments
-are saved under the workspace's `uploads/<run-id>/`.
+or the job's `workspace`. Service startup creates missing workspace directories
+with starter instructions and skill links; existing directories are left as
+they are. Hooks run in their job directory. Incoming attachments
+are saved under the workspace's `uploads/<run-id>/`. Claude Code runs load only
+project and local settings (`--setting-sources project,local`), not the user's
+personal `~/.claude` configuration.
 
 Chat turns are serialized within each conversation. Each DM shares one session
 across its threads; channel threads have independent sessions. Different jobs
@@ -28,7 +32,9 @@ a fresh session. Jobs start a fresh session every run.
 
 ## Prompt context
 
-The first Slack turn gets concise delivery and workspace guidance. Every turn
+The first Slack turn gets concise delivery and workspace guidance: the working
+directory is that conversation's workspace, and other conversations and jobs may
+use other workspaces. Every turn
 gets fresh structured metadata identifying its source, provider, workspace
 (`{"name", "path"}`), sender, channel, message, reply destination, and
 attachments. Replies can follow a DM thread while sharing the DM's single

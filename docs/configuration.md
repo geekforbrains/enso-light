@@ -3,28 +3,35 @@
 The default home is `~/.enso`; `--home PATH` selects another home.
 
 ```text
-~/.enso/
+~/.enso/                     # a git repository
+├── .gitignore
+├── AGENTS.md                # shared instructions
+├── CLAUDE.md -> AGENTS.md
+├── .agents/skills/          # shared skills
+│   └── enso/SKILL.md
+├── .claude/skills -> ../.agents/skills
 ├── config.json
 ├── .env
 ├── enso.db
-├── skills/
-│   └── enso/SKILL.md
-├── workspace/
-│   ├── AGENTS.md
-│   ├── CLAUDE.md -> AGENTS.md
-│   ├── .agents/skills -> ../../skills
-│   ├── .claude/skills -> ../../skills
-│   └── uploads/
 ├── jobs/
-└── logs/
+├── logs/
+└── workspaces/
+    └── main/                # the starter workspace
+        ├── AGENTS.md        # this workspace's focus
+        ├── CLAUDE.md -> AGENTS.md
+        ├── .agents/skills/  # this workspace's skills
+        ├── .claude/skills -> ../.agents/skills
+        └── uploads/
 ```
 
 `enso init` creates missing directories and starter files without overwriting
-existing content. Credentials and generated files use private permissions. Each
-agent process runs in its [workspace](#workspaces)'s directory; job hooks run in
-their job's directory. The starter `main` workspace is `workspace/`. `skills/`
-holds agent skills; Claude Code and Codex find them through the workspace links.
-Add your own skills beside `enso`.
+existing content, runs `git init` in the home when it has no `.git`, and then
+[creates missing workspaces](#workspace-scaffolding). Credentials and generated
+files use private permissions. Each agent process runs in its
+[workspace](#workspaces)'s directory; job hooks run in their job's directory.
+The starter `.gitignore` keeps `.env`, `enso.db*`, `daemon.lock`, `logs/`, and
+`workspaces/*/uploads/` out of the repository; edit it freely, since `init`
+never replaces it. Enso does not commit anything.
 
 ## config.json
 
@@ -41,7 +48,7 @@ Add your own skills beside `enso`.
     "codex": { "cli": "codex", "executable": "${ENSO_HOME}/bin/codex" }
   },
   "workspaces": {
-    "main": { "path": "${ENSO_HOME}/workspace" },
+    "main": { "path": "${ENSO_HOME}/workspaces/main" },
     "acme": { "path": "${HOME}/Projects/acme", "provider": "codex" }
   },
   "slack": {
@@ -86,9 +93,19 @@ job's `provider`, else its workspace's `provider`, else `defaults.provider`.
 
 A left-out or blank (`""`) `model`, `effort`, or `executable` uses the CLI's own
 default. `model` and `effort` must not start with `-`. Your installed CLI must
-already be authenticated; configure its permissions for unattended operation
-through native settings or explicit `args`. Enso does not manage provider
-credentials.
+already be authenticated. Enso does not manage provider credentials.
+
+Claude Code runs always get `--setting-sources project,local` before your
+`args`, so they ignore your personal `~/.claude` settings, skills, plugins, and
+`CLAUDE.md`; see [instructions and skills](#instructions-and-skills). Grant
+unattended permissions through provider `args`, such as
+`--dangerously-skip-permissions`, or a workspace's `.claude/settings.json`.
+The `env` block and `apiKeyHelper` in `~/.claude/settings.json` are ignored
+too; put variables such as `ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_BEDROCK` in
+the home's `.env`, which agent processes receive, or in a workspace's
+`.claude/settings.json`.
+Codex runs use your normal Codex configuration, so configure its permissions
+there or through `args`.
 
 ### workspaces
 
@@ -101,10 +118,55 @@ Names use letters, numbers, hyphens, and underscores.
 | `provider` | Optional provider name for runs in this workspace; blank or left out uses `defaults.provider` |
 
 Two workspaces may share a path, for example to use one repository with
-different providers. The directory must exist when a run starts; otherwise the
-run fails. Each run sets `ENSO_WORKSPACE` to the absolute path, and incoming
-attachments go to `uploads/<run-id>/` inside it, readable only by the Enso
-user.
+different providers. Each run sets `ENSO_WORKSPACE` to the absolute path, and
+incoming attachments go to `uploads/<run-id>/` inside it, readable only by the
+Enso user.
+
+#### Workspace scaffolding
+
+`enso init` and service startup create each configured workspace whose
+directory does not exist, inside or outside the Enso home, with private
+permissions and a starter layout:
+
+- `AGENTS.md`, a short note to describe the workspace's focus
+- `CLAUDE.md -> AGENTS.md`
+- `.agents/skills/` for skills only this workspace uses
+- `.claude/skills -> ../.agents/skills`
+
+An existing directory, such as a project repository, is used as it is: Enso adds
+no files or links, only `uploads/<run-id>/` when a message has attachments. A
+path that exists but is not a directory is an error. A directory removed while
+the service runs makes its runs fail until it is recreated or the service
+restarts.
+
+### Instructions and skills
+
+Agents read instructions and skills in two layers:
+
+| Layer | Instructions | Skills | Applies to |
+|---|---|---|---|
+| Shared | `~/.enso/AGENTS.md` | `~/.enso/.agents/skills/` | Workspaces inside the Enso home |
+| Workspace | `<workspace>/AGENTS.md` | `<workspace>/.agents/skills/` | That workspace |
+
+`CLAUDE.md` and `.claude/skills` link to the same files, so Claude Code and
+Codex share one copy. The bundled `enso` skill lives in the shared layer; add
+your own skills beside it, or in a workspace when only that workspace needs
+them. A workspace outside the Enso home, such as `${HOME}/Projects/acme`, gets
+only its own layer; copy or link anything it needs from the shared one.
+
+Claude Code finds the shared layer by walking up from the workspace. Because
+Enso passes `--setting-sources project,local`, it loads only these project files
+and the workspace's `.claude/settings.json` and `.claude/settings.local.json`,
+never your personal `~/.claude` configuration.
+
+Codex needs a git repository to find the shared layer: it walks up from the
+workspace to the repository root, which is why the Enso home is a git
+repository. Without git, `enso init` warns instead of failing, and Codex runs
+in home workspaces see only their own `AGENTS.md`. For a workspace outside the
+home, Codex loads its `.agents/skills/` only when the workspace is a git
+repository or is trusted in your Codex configuration. Codex always also loads
+`~/.agents/skills` and `~/.codex/AGENTS.md`; Enso cannot isolate Codex runs
+from them.
 
 ### slack
 

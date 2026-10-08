@@ -30,7 +30,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Create missing configuration, workspace guidance and job/upload directories.
+    /// Create the missing Enso home layout, git repository, and configured workspaces.
     Init,
     /// Run the foreground service.
     Run,
@@ -150,11 +150,16 @@ async fn execute(cli: Cli) -> Result<()> {
             }
             if home.join("config.json").exists() {
                 config::load(&home)?;
+            } else {
+                config::read_dotenv(&home)?;
             }
             config::init(&home)?;
             Db::open(&home)?;
+            let warnings: Vec<String> = config::git_init(&home).into_iter().collect();
+            // Scaffolding needs parsed workspace paths, not a valid provider yet.
+            let workspaces = config::scaffold(&config::load(&home)?.config)?;
             print(
-                &json!({"initialized":home,"next":"Set providers.main.cli in config.json and the Slack tokens in .env, then run enso config check."}),
+                &json!({"initialized":home,"workspaces_created":workspaces,"warnings":warnings,"next":"Set providers.main.cli and the Slack tokens in .env, then run enso config check."}),
                 cli.json,
             );
         }

@@ -71,6 +71,9 @@ pub async fn run(home: PathBuf) -> Result<()> {
     loaded.validate()?;
     jobs::list(&home, &loaded.config)?;
     let _lock = lock(&home)?;
+    for path in config::scaffold(&loaded.config)? {
+        eprintln!("Created workspace {}", path.display());
+    }
     let db = Db::open(&home)?;
     db.runtime("starting", None)?;
     let slack = Slack::new(&loaded.config.slack, &loaded.tokens)?;

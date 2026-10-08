@@ -13,11 +13,18 @@ enso service install|start|stop|restart|uninstall|status
 enso service logs [--follow]
 ```
 
-`init` creates starter files, never replaces existing ones. `run` starts the
+`init` creates the [home layout](configuration.md) and starter files, never
+replacing existing ones. It runs `git init` in a home without `.git`, since
+Codex needs the repository to load the shared `AGENTS.md` and `.agents/skills`;
+without git it warns in its output instead of failing. It then creates each
+configured workspace whose directory is missing, as
+[scaffolded workspaces](configuration.md#workspace-scaffolding); the service does
+the same at startup. An existing `config.json` or `.env` that fails to load stops `init`
+before anything is created. `run` starts the
 foreground service. A lock allows only one service per Enso home. Job triggers
 and message sends need a running service; they submit work to SQLite.
 
-Install an authenticated Claude Code or Codex CLI first, then install Enso:
+Install git and an authenticated Claude Code or Codex CLI first, then install Enso:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/geekforbrains/enso-light/releases/latest/download/enso-installer.sh | sh

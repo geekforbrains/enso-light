@@ -6,17 +6,18 @@ description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, an
 # Enso
 
 Enso runs your installed agent CLI in a workspace: the directory configured for
-this conversation or job, also in `$ENSO_WORKSPACE`. Each turn's injected context
-identifies Slack versus a job, the workspace, the sender and destination, and
-local attachments.
+this conversation or job, also in `$ENSO_WORKSPACE`. Other conversations and
+jobs may share it or use other workspaces, so preserve unrelated work. Each turn's
+injected context identifies Slack versus a job, the workspace, the sender and
+destination, and local attachments.
 DMs share one session, including DM threads. Channel threads have separate sessions.
 Messages in a busy conversation queue in order. Different conversations and jobs
 run in parallel with no global concurrency limit or setting.
 
 For Slack turns, your final response is sent automatically to the current reply
 destination. Use ordinary Markdown. Do not send that same answer again with the CLI.
-Incoming attachments are local files under the workspace's `uploads/`; inspect
-the supplied paths.
+Incoming attachments are local files under the workspace's
+`uploads/<run-id>/`; inspect the supplied paths.
 
 ## Read Slack context
 
@@ -118,6 +119,15 @@ hook, redirect commands that print, such as `enso message send`, with `>&2`.
 Job output is saved, not sent to Slack automatically. Use `enso message send`
 when the job asks for a notification; a job that may retry should notify from
 postrun after accepting, since sent messages are not withdrawn.
+
+## Instructions and skills
+
+Shared instructions are `$ENSO_HOME/AGENTS.md` and shared skills live in
+`$ENSO_HOME/.agents/skills/`; both apply to workspaces inside the Enso home.
+A workspace's own `AGENTS.md` and `.agents/skills/` apply only to that
+workspace. Put a skill in the workspace when only its conversations and jobs
+need it, and in the shared directory otherwise. `CLAUDE.md` and
+`.claude/skills` link to the same files for Claude Code.
 
 ## Configuration and status
 
