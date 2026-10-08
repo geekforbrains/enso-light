@@ -101,17 +101,10 @@ A left-out or blank (`""`) `model`, `effort`, or `executable` uses the CLI's own
 default. `model` and `effort` must not start with `-`. Your installed CLI must
 already be authenticated. Enso does not manage provider credentials.
 
-Claude Code runs always get `--setting-sources project,local` before your
-`args`, so they ignore your personal `~/.claude` settings, skills, plugins, and
-`CLAUDE.md`; see [instructions and skills](#instructions-and-skills). Grant
-unattended permissions through provider `args`, such as
-`--dangerously-skip-permissions`, or a workspace's `.claude/settings.json`.
-The `env` block and `apiKeyHelper` in `~/.claude/settings.json` are ignored
-too; put variables such as `ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_BEDROCK` in
-the home's `.env`, which agent processes receive, or in a workspace's
-`.claude/settings.json`.
-Codex runs use your normal Codex configuration, so configure its permissions
-there or through `args`.
+Both CLIs run with your normal configuration, as in a terminal opened in the
+workspace: your `~/.claude` or `~/.codex` settings, skills, plugins, and
+instructions apply. Grant unattended permissions there or through provider
+`args`, such as `--dangerously-skip-permissions`.
 
 ### workspaces
 
@@ -162,19 +155,15 @@ your own skills beside it, or in a workspace when only that workspace needs
 them. A workspace outside the Enso home, such as `${HOME}/Projects/acme`, gets
 only its own layer; copy or link anything it needs from the shared one.
 
-Claude Code finds the shared layer by walking up from the workspace. Because
-Enso passes `--setting-sources project,local`, it loads only these project files
-and the workspace's `.claude/settings.json` and `.claude/settings.local.json`,
-never your personal `~/.claude` configuration.
+Claude Code finds the shared layer by walking up from the workspace, alongside
+your own `~/.claude` configuration.
 
 Codex needs a git repository to find the shared layer: it walks up from the
 workspace to the repository root, which is why the Enso home is a git
 repository. Without git, `enso init` warns instead of failing, and Codex runs
 in home workspaces see only their own `AGENTS.md`. For a workspace outside the
 home, Codex loads its `.agents/skills/` only when the workspace is a git
-repository or is trusted in your Codex configuration. Codex always also loads
-`~/.agents/skills` and `~/.codex/AGENTS.md`; Enso cannot isolate Codex runs
-from them.
+repository or is trusted in your Codex configuration.
 
 For the same reason, a workspace inside the home that is its own git
 repository, such as a project cloned into `~/.enso/workspaces/acme`, is its own

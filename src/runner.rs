@@ -94,8 +94,6 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
             "stream-json",
             "--permission-prompts",
             "none",
-            "--setting-sources",
-            "project,local",
         ]
         .map(str::to_owned)
         .to_vec(),
@@ -585,25 +583,25 @@ mod tests {
     }
 
     #[test]
-    fn claude_runs_load_only_project_and_local_settings() {
+    fn claude_runs_keep_the_users_own_settings() {
         let temp = tempfile::tempdir().unwrap();
         let mut req = request(temp.path(), "claude", "");
         req.settings.args = vec!["--dangerously-skip-permissions".into()];
         let args = arguments(&req).unwrap();
-        let sources = args.iter().position(|a| a == "--setting-sources").unwrap();
-        assert_eq!(args[sources + 1], "project,local");
         let user = args
             .iter()
             .position(|a| a == "--dangerously-skip-permissions")
             .unwrap();
-        assert!(sources < user);
-        let mut req = request(temp.path(), "codex", "");
-        req.settings.args = vec!["--dangerously-skip-permissions".into()];
-        assert!(
-            !arguments(&req)
-                .unwrap()
-                .iter()
-                .any(|a| a.contains("setting-sources") || a.contains("project,local"))
+        assert_eq!(
+            args[..user],
+            [
+                "--print",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--permission-prompts",
+                "none"
+            ]
         );
     }
 

@@ -14,9 +14,8 @@ configured workspace directory: the workspace a Slack conversation is routed to,
 or the job's `workspace`. Service startup creates missing workspace directories
 with starter instructions and skill links; existing directories are left as
 they are. Hooks run in their job directory. Incoming attachments
-are saved under the workspace's `uploads/<run-id>/`. Claude Code runs load only
-project and local settings (`--setting-sources project,local`), not the user's
-personal `~/.claude` configuration.
+are saved under the workspace's `uploads/<run-id>/`. Enso adds no settings overrides;
+each CLI loads its own configuration as usual.
 
 Chat turns are serialized within each conversation. Each DM shares one session
 across its threads; channel threads have independent sessions. Different jobs

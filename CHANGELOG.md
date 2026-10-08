@@ -5,6 +5,15 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Code runs use your normal `~/.claude` settings, skills, plugins, and
+  `CLAUDE.md` again: Enso no longer passes `--setting-sources project,local`.
+  Both CLIs now run as they do in a terminal opened in the workspace. Step 7 of
+  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/v0.2.0/CHANGELOG.md#upgrading-from-01x)
+  is no longer needed; anything you moved into provider `args`, `.env`, or a
+  workspace's `.claude/settings.json` keeps working.
+
 ## [0.2.0] - 2026-10-08
 
 ### Upgrading from 0.1.x

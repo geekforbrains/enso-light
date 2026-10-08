@@ -20,8 +20,8 @@ replies with your user ID; add it as `"dms": {"U012345": "main"}` in
 `~/.enso` is a git repository whose `AGENTS.md` and `.agents/skills/` are shared
 by every workspace inside it. Each workspace is a directory where its
 conversations and jobs run, with its own `AGENTS.md` and skills; the starter is
-`~/.enso/workspaces/main`. Claude Code runs ignore your personal `~/.claude`
-configuration, so grant permissions in provider `args`. See
+`~/.enso/workspaces/main`. Claude Code and Codex run as they do in your
+terminal, with your own settings, in the workspace directory. See
 [configuration](docs/configuration.md#instructions-and-skills).
 
 Each DM shares one session across its threads; channel threads get separate
