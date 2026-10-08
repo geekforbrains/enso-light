@@ -74,11 +74,6 @@ release. GitHub immutable releases are enabled for this repository. Their
 required order is draft, upload every asset, then publish.
 Prereleases are marked as prereleases and do not replace Latest.
 
-The initial public launch also requires checking the tracked tree and Git
-history for secrets and private material. Restore the project's license and
-verify the release before changing repository visibility. Later release
-requests do not authorize changing visibility.
-
 ## Installation and upgrades
 
 The generated shell installer places `enso` in `~/.local/bin` by default.

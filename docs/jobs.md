@@ -42,14 +42,13 @@ processes: every agent attempt, prerun, and postrun. A job that leaves out
 at most 10). See [Postrun and retries](#postrun-and-retries).
 
 `cron` uses five fields (minute, hour, day of month, month, day of week) and the
-machine's timezone. Omit it for a manual-only job. `enabled` defaults to true and
-controls scheduling; a disabled job can still be triggered manually.
-Missed occurrences during downtime are not replayed. A job never overlaps itself:
-scheduled occurrences while it is queued or running are skipped without catch-up,
-and manual triggers while busy are rejected. Different jobs and Slack
-conversations can run in parallel without a global concurrency limit.
-Sunday is `0` or `7`; weekday names are supported. When both day-of-month and
-day-of-week are restricted, standard cron matches either restriction.
+machine's timezone. Sunday is `0` or `7`; weekday names are supported. When both
+day-of-month and day-of-week are restricted, standard cron matches either
+restriction. Omit `cron` for a manual-only job. `enabled` defaults to true and
+controls scheduling; a disabled job can still be triggered manually. Missed
+occurrences during downtime are not replayed. A job never overlaps itself:
+scheduled occurrences while it is queued or running are skipped, and manual
+triggers while busy are rejected.
 
 ```sh
 enso jobs list
@@ -58,38 +57,21 @@ enso jobs run morning-report --wait
 ```
 
 `--wait` waits for the job's result and can be used from a shell, agent, or hook.
-Without it, the command returns as soon as the job is queued. The service owns
-the submitted job, so it can continue after the calling shell or agent turn ends.
-Its completion does not resume the calling turn; send any requested notification
-from the job itself.
-Job definitions are reread each scheduler minute and at run start, so
-job-file changes need no restart. Changes to `config.json` or `.env` require one.
+Without it, the command returns once the job is queued; the service owns the run,
+so it continues after the calling shell or agent turn ends, and its completion
+does not resume that turn. Job files are reread each scheduler minute and at run
+start, so changes need no restart; `config.json` and `.env` changes do.
 
-Manual and cron triggers use the same pipeline and fresh native sessions. A job
-uses its provider's settings as defined; to change the model, effort, or
-arguments, define another provider and name it. `prompt.md` is required
-even when a prerun sometimes skips work. Final agent output is stored in SQLite;
-it is not automatically posted to Slack. Use `enso message send` from the agent
-or postrun when notification is wanted. Without `--to`, it posts to `notify`; a
-job without `notify` must name `--to`. Triggering a job from Slack does not change
-its destination.
+Every run starts a fresh native session. The agent's final output is stored, not
+posted to Slack; use `enso message send` from the agent or postrun to notify.
+Without `--to`, it posts to `notify`, even when the job was triggered from Slack.
 
 ## Invalid jobs
 
-Enso checks each job whenever it loads jobs, and an invalid job never stops the
-others or Slack:
-
-- `enso config check` lists every invalid job's error, prefixed with
-  `job NAME:`, and exits non-zero.
-- The service skips an invalid job at startup and each scheduler minute, logging
-  its error when it first appears or changes rather than every minute.
-- `enso jobs list` shows an invalid job as `{"name": ..., "error": ...,
-  "last_run": ...}` alongside the valid ones.
-- `enso jobs run NAME` fails with the job's error, and a queued run whose job
-  became invalid fails with it at run start.
-
-An unknown or missing `job.json` field is named in the error (for example
-``unknown field `execution` ``); other invalid values get a generic message.
+An invalid job never stops other jobs or Slack. `enso config check` lists each
+one's error (prefixed `job NAME:`) and exits non-zero, the service skips it and
+logs its error when it first appears or changes, `enso jobs list` shows it with
+an `error` field, and `enso jobs run` refuses it.
 
 ## Hooks and variables
 
@@ -111,24 +93,18 @@ skip instead:
 {"skip":true,"reason":"No new items"}
 ```
 
-A skip runs neither the agent nor postrun. A failed prerun prevents the agent
-and postrun from running. Prerun receives the run's context JSON on stdin (the
-same `<enso-context>` block the agent gets) and runs once per run. Timeouts and cancellation stop a hook's process group. Hook
-failure is visible in the job's outcome.
+A skip runs neither the agent nor postrun, and a failed prerun stops both.
+Prerun runs once per run and receives the run's context JSON on stdin, the same
+`<enso-context>` block the agent gets. A job's context is
+`{"source": "job", "job": {"name", "trigger", "scheduled_for"}}`: `trigger` is
+`cron` or `manual`, and `scheduled_for` is set only for cron runs. Timeouts and
+cancellation stop a hook's process group, and hook failures show in the job's
+outcome.
 
-Enso sets `ENSO_HOME`, `ENSO_WORKSPACE` (the workspace's absolute path),
-`ENSO_RUN_ID`, `ENSO_SOURCE`, and `ENSO_JOB` for the agent and hooks.
-`ENSO_CHANNEL` and `ENSO_THREAD_TS` provide the Slack conversation or the job's
-`notify` destination, and are empty without one.
-`ENSO_SOURCE` is `slack` or `job`; `ENSO_JOB` is empty on Slack turns. Enso owns
-these metadata variables and overrides conflicting values from the inherited
-environment or `.env`.
-
-A job's context JSON is `{"source": "job", "job": {"name", "trigger",
-"scheduled_for"}}`: `trigger` is `cron` or `manual`, and `scheduled_for` is set
-only for cron runs. Hooks and the agent read the workspace, run ID, job name, and
-notify destination from the variables above. Jobs never inherit a Slack sender's
-identity or a chat session.
+The agent and hooks get `ENSO_HOME`, `ENSO_WORKSPACE` (the workspace's absolute
+path), `ENSO_RUN_ID`, `ENSO_SOURCE` (`job`), `ENSO_JOB`, and `ENSO_CHANNEL` /
+`ENSO_THREAD_TS` (the `notify` destination, empty without one). Enso sets these
+over any inherited or `.env` values.
 
 ### Postrun and retries
 
