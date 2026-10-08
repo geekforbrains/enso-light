@@ -13,6 +13,17 @@ Versioning and publication follow the [release flow](docs/releases.md).
   [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/v0.2.0/CHANGELOG.md#upgrading-from-01x)
   is no longer needed; anything you moved into provider `args`, `.env`, or a
   workspace's `.claude/settings.json` keeps working.
+- Claude Code runs no longer get `--permission-prompts none`; print mode already
+  denies anything that would prompt, and your settings or provider `args` decide
+  the rest.
+- A failed turn reports that the CLI exited with a status or reported an error,
+  instead of a guessed category such as `authentication_failed`. The end of the
+  CLI's output now goes to the service log, with secrets redacted; a session
+  that cannot be resumed still says to use `!clear`.
+- **Breaking:** Codex runs no longer get `--skip-git-repo-check`. Workspaces
+  inside the Enso home are in its git repository; for a Codex workspace
+  elsewhere, trust the folder in Codex or add `--skip-git-repo-check` to the
+  provider's `args`.
 
 ## [0.2.0] - 2026-10-08
 

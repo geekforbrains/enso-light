@@ -34,6 +34,22 @@ pub struct Outcome {
     pub session_id: Option<String>,
 }
 
+/// A failed CLI turn. It displays only a short message, which is safe for Slack and
+/// run records; `detail` holds the tail of the CLI's own output for the service log.
+#[derive(Debug)]
+pub struct Failure {
+    pub message: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Failure {}
+
 pub async fn execute(request: Request, cancel: CancellationToken) -> Result<Outcome> {
     ensure!(
         request.workspace.is_absolute(),
@@ -65,12 +81,14 @@ pub async fn execute(request: Request, cancel: CancellationToken) -> Result<Outc
     )
     .await?;
     if !output.status.success() {
-        bail!(
-            "{} ({} exited {})",
-            failure_hint(&output.stderr),
-            request.settings.cli,
-            output.status
+        let status = output.status.code().map_or_else(
+            || output.status.to_string(),
+            |code| format!("status {code}"),
         );
+        return Err(failure(
+            format!("{} exited with {status}", request.settings.cli),
+            &output.stderr,
+        ));
     }
     parse_output(
         &request.settings.cli,
@@ -82,21 +100,10 @@ pub async fn execute(request: Request, cancel: CancellationToken) -> Result<Outc
 fn arguments(request: &Request) -> Result<Vec<String>> {
     let settings = &request.settings;
     let mut args: Vec<String> = match settings.cli.as_str() {
-        "codex" => vec![
-            "exec".into(),
-            "--json".into(),
-            "--skip-git-repo-check".into(),
-        ],
-        "claude" => [
-            "--print",
-            "--verbose",
-            "--output-format",
-            "stream-json",
-            "--permission-prompts",
-            "none",
-        ]
-        .map(str::to_owned)
-        .to_vec(),
+        "codex" => vec!["exec".into(), "--json".into()],
+        "claude" => ["--print", "--verbose", "--output-format", "stream-json"]
+            .map(str::to_owned)
+            .to_vec(),
         _ => bail!("provider cli must be codex or claude"),
     };
     args.extend(settings.args.clone());
@@ -203,10 +210,12 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
                 ensure!(!completed, "invalid_output: CLI emitted multiple results");
                 completed = true;
             }
-            ("codex", "turn.failed" | "error") => bail!("{}", failure_hint(&event.to_string())),
+            ("codex", "turn.failed" | "error") => {
+                return Err(failure("codex reported an error".into(), line));
+            }
             ("claude", "result") => {
                 if event["is_error"].as_bool().unwrap_or(false) || event["subtype"] != "success" {
-                    bail!("{}", failure_hint(&event.to_string()));
+                    return Err(failure("claude reported an error".into(), line));
                 }
                 ensure!(!completed, "invalid_output: CLI emitted multiple results");
                 text = event["result"]
@@ -215,7 +224,7 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
                     .into();
                 completed = true;
             }
-            ("claude", "error") => bail!("{}", failure_hint(&event.to_string())),
+            ("claude", "error") => return Err(failure("claude reported an error".into(), line)),
             _ => {}
         }
     }
@@ -230,11 +239,11 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
     Ok(Outcome { text, session_id })
 }
 
-// Native failures can contain prompts, tool output, or credentials. Return a useful
-// category, never arbitrary provider stderr or JSON to Slack or service logs.
-fn failure_hint(message: &str) -> &'static str {
-    let lower = message.to_ascii_lowercase();
-    if [
+/// Builds a failure from the CLI's output. Slack users only need to know when to
+/// `!clear`; everything else the CLI said goes to the service log.
+fn failure(message: String, output: &str) -> anyhow::Error {
+    let lower = output.to_ascii_lowercase();
+    let message = if [
         "no rollout found",
         "no conversation found",
         "no conversation session",
@@ -243,52 +252,16 @@ fn failure_hint(message: &str) -> &'static str {
     .iter()
     .any(|s| lower.contains(s))
     {
-        "session_unavailable: native session could not be resumed; use !clear"
-    } else if [
-        "not logged in",
-        "not authenticated",
-        "authentication",
-        "unauthorized",
-        "api key",
-        "api_key",
-        "login required",
-        "401",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-    {
-        "authentication_failed: check the selected CLI's login on this machine"
-    } else if ["rate limit", "quota", "usage limit", "429"]
-        .iter()
-        .any(|s| lower.contains(s))
-    {
-        "usage_limit: the selected CLI reported an account or rate limit"
-    } else if lower.contains("effort")
-        && ["invalid", "unsupported", "not supported"]
-            .iter()
-            .any(|s| lower.contains(s))
-    {
-        "invalid_effort: check the provider effort for the selected CLI and model"
-    } else if lower.contains("model")
-        && [
-            "invalid",
-            "unsupported",
-            "not supported",
-            "not found",
-            "unavailable",
-        ]
-        .iter()
-        .any(|s| lower.contains(s))
-    {
-        "invalid_model: check the provider model for the selected CLI"
-    } else if ["approval", "permission denied", "permission prompt"]
-        .iter()
-        .any(|s| lower.contains(s))
-    {
-        "permission_required: check the native CLI's permissions and provider args"
+        "session_unavailable: native session could not be resumed; use !clear".into()
     } else {
-        "execution_failed: native CLI failed; inspect its local session for details"
-    }
+        format!("{message}; see enso service logs")
+    };
+    let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+    // Keep the end, which is where CLIs explain the failure.
+    let skip = tail.chars().count().saturating_sub(1800);
+    let detail = tail.chars().skip(skip).collect();
+    Failure { message, detail }.into()
 }
 
 pub async fn hook(
@@ -494,9 +467,18 @@ mod tests {
         let bad = format!(
             r#"{{"type":"result","subtype":"error_during_execution","session_id":"{SESSION}","is_error":true,"result":"secret"}}"#
         );
-        let error = parse_output("claude", &bad, None).unwrap_err().to_string();
-        assert!(error.contains("execution_failed"));
-        assert!(!error.contains("secret"));
+        let error = parse_output("claude", &bad, None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "claude reported an error; see enso service logs"
+        );
+        assert!(
+            error
+                .downcast_ref::<Failure>()
+                .unwrap()
+                .detail
+                .contains("secret")
+        );
         assert!(parse_output("codex", r#"{"type":"turn.completed"}"#, None).is_err());
         assert!(parse_output("codex", "not json", None).is_err());
     }
@@ -583,25 +565,54 @@ mod tests {
     }
 
     #[test]
-    fn claude_runs_keep_the_users_own_settings() {
+    fn clis_get_only_the_flags_enso_needs_before_user_args() {
         let temp = tempfile::tempdir().unwrap();
-        let mut req = request(temp.path(), "claude", "");
-        req.settings.args = vec!["--dangerously-skip-permissions".into()];
-        let args = arguments(&req).unwrap();
-        let user = args
-            .iter()
-            .position(|a| a == "--dangerously-skip-permissions")
-            .unwrap();
+        for (cli, expected) in [
+            (
+                "claude",
+                &["--print", "--verbose", "--output-format", "stream-json"][..],
+            ),
+            ("codex", &["exec", "--json"][..]),
+        ] {
+            let mut req = request(temp.path(), cli, "");
+            req.settings.args = vec!["--dangerously-skip-permissions".into()];
+            let args = arguments(&req).unwrap();
+            assert_eq!(args[..expected.len()], *expected, "{cli}");
+            assert_eq!(args[expected.len()], "--dangerously-skip-permissions");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_exit_keeps_cli_output_out_of_the_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut script = String::from("cat >/dev/null\n");
+        for line in 1..=30 {
+            script.push_str(&format!("echo 'line {line}' >&2\n"));
+        }
+        script.push_str("exit 3");
+        let error = execute(
+            request(temp.path(), "codex", &script),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
-            args[..user],
-            [
-                "--print",
-                "--verbose",
-                "--output-format",
-                "stream-json",
-                "--permission-prompts",
-                "none"
-            ]
+            error.to_string(),
+            "codex exited with status 3; see enso service logs"
+        );
+        let detail = &error.downcast_ref::<Failure>().unwrap().detail;
+        assert!(detail.starts_with("line 11\n") && detail.ends_with("line 30"));
+        let missing = request(
+            temp.path(),
+            "claude",
+            "cat >/dev/null\necho 'No conversation found with session ID: x' >&2\nexit 1",
+        );
+        assert!(
+            execute(missing, CancellationToken::new())
+                .await
+                .unwrap_err()
+                .to_string()
+                .starts_with("session_unavailable:")
         );
     }
 

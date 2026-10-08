@@ -104,7 +104,15 @@ already be authenticated. Enso does not manage provider credentials.
 Both CLIs run with your normal configuration, as in a terminal opened in the
 workspace: your `~/.claude` or `~/.codex` settings, skills, plugins, and
 instructions apply. Grant unattended permissions there or through provider
-`args`, such as `--dangerously-skip-permissions`.
+`args`, such as `--dangerously-skip-permissions`. Enso adds only what it needs to
+run a turn and read the reply: `--print --verbose --output-format stream-json`
+for Claude Code or `exec --json` for Codex, then your `args`, the model, the
+effort, and the session to resume.
+
+Codex refuses to run outside a git repository or a folder trusted in your Codex
+configuration. Workspaces inside the Enso home are in its repository; for a
+workspace elsewhere, trust the folder in Codex or add `--skip-git-repo-check` to
+the provider's `args`.
 
 ### workspaces
 

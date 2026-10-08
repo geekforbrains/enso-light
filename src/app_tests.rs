@@ -284,11 +284,9 @@ async fn failed_provider_still_calls_postrun_with_safe_error_and_job_failure() {
     assert_eq!(post["status"], "failed");
     assert_eq!(post["result"], "");
     assert_eq!(post["variables"]["VALUE"], "input");
-    assert!(
-        post["error"]
-            .as_str()
-            .unwrap()
-            .contains("authentication_failed")
+    assert_eq!(
+        post["error"],
+        "claude exited with status 7; see enso service logs"
     );
     assert!(
         !post["error"]

@@ -31,6 +31,12 @@ session. Paths are compared after removing redundant separators, so
 path fails the turn until `!clear` starts a fresh session. Jobs start a fresh
 session every run.
 
+A failed turn's error, which is also the Slack reply, says only that the CLI
+exited with a status or reported an error, or that its session could not be
+resumed and `!clear` starts fresh. The last lines of the CLI's own output go to
+the service log (`enso service logs`) with `.env` values and Slack tokens
+redacted.
+
 ## Prompt context
 
 The first Slack turn gets concise delivery and workspace guidance: the working

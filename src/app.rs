@@ -650,6 +650,16 @@ async fn execute_inner(
         let (mut state, text, mut error, next_session) = match outcome {
             Ok(result) => ("succeeded".to_owned(), result.text, None, result.session_id),
             Err(error) => {
+                if let Some(failure) = error.downcast_ref::<runner::Failure>()
+                    && !failure.detail.is_empty()
+                {
+                    eprintln!(
+                        "Run {} {} output:\n{}",
+                        work.id,
+                        settings.cli,
+                        redact(&failure.detail, loaded)
+                    );
+                }
                 let error = redact(&format!("{error:#}"), loaded);
                 let state = if cancel.is_cancelled() || error.contains("cancelled") {
                     "cancelled"
