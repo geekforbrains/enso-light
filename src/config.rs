@@ -161,6 +161,7 @@ pub struct SlackConfig {
     pub working_reaction: String,
     pub queued_message: String,
     pub timeout_message: String,
+    pub unconfigured_message: String,
 }
 
 impl Default for SlackConfig {
@@ -172,6 +173,7 @@ impl Default for SlackConfig {
             queued_message: "Queued — I’ll get to this after the current turn.".into(),
             timeout_message: "This turn timed out. You can send another message to continue."
                 .into(),
+            unconfigured_message: "Enso isn't set up for this conversation.".into(),
         }
     }
 }
@@ -735,6 +737,16 @@ mod tests {
         assert_eq!(channels["G067890"].workspace(), "acme-opus");
         assert_eq!(channels["G067890"].mention(), Some(Mention::Never));
         assert_eq!(channels["C111"].mention(), None);
+        assert_eq!(
+            config.slack.unconfigured_message,
+            "Enso isn't set up for this conversation."
+        );
+        let silent = routed(
+            r#"{"main":{"path":"/srv/main"}}"#,
+            r#"{"unconfigured_message":""}"#,
+        )
+        .unwrap();
+        assert!(silent.slack.unconfigured_message.is_empty());
         let (_temp, loaded) = load_config(
             r#"{"defaults":{"provider":"main","mention":"first"},"providers":{"main":{"cli":"claude"}}}"#,
             "",

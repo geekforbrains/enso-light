@@ -108,8 +108,9 @@ user.
 
 ### slack
 
-`dms` and `channels` route conversations to workspaces. Enso ignores
-conversations they do not route.
+`dms` and `channels` route conversations to workspaces. Enso runs nothing for
+a conversation they do not route; see
+[unconfigured conversations](#unconfigured-conversations).
 
 ```json
 "slack": {
@@ -148,6 +149,26 @@ session.
 
 Other thread replies need a mention.
 
+#### Unconfigured conversations
+
+When no route matches a DM, or an @mention in a channel, Enso replies once per
+message with `unconfigured_message` and the ID to add, in the DM (following its
+thread) or in the mention's thread:
+
+```text
+Enso isn't set up for this conversation.
+
+To enable it, add `C0ABC123` to `slack.channels` in config.json.
+```
+
+DMs name the sender's user ID and `slack.dms`, so DMing the bot is a quick way
+to learn your own user ID. Anyone who can reach the bot can see this reply, and
+with it their own user ID or the channel ID; nothing runs, and no conversation
+starts. Unmentioned messages in an unrouted channel get no reply, and neither do
+routed channels whose mention mode does not match. Set `unconfigured_message` to
+`""` to stay silent instead; Enso then neither replies nor records the event, so
+a redelivery after you add the route is admitted.
+
 Other optional Slack settings:
 
 | Field | Default / purpose |
@@ -155,6 +176,7 @@ Other optional Slack settings:
 | `working_reaction` | `thinking_face` |
 | `queued_message` | Acknowledges a turn queued behind another |
 | `timeout_message` | Explains that a turn timed out |
+| `unconfigured_message` | Opens the reply to an unrouted conversation; `""` disables it |
 
 ## Environment
 
@@ -207,8 +229,9 @@ DM-only installation can omit `app_mentions:read`, the `channels` and `groups`
 scopes, and their events. Enso does not use other scopes such as
 `chat:write.public`, `im:write`, or `users:read.email`.
 
-Only one service should consume the same Socket Mode app token. Enso preserves
-Slack event IDs to ignore duplicate deliveries. Use `enso service status` to
+Only one service should consume the same Socket Mode app token. Enso records
+each Slack message's channel and timestamp, so duplicate deliveries (including a
+mention sent as both `message` and `app_mention`) are handled once. Use `enso service status` to
 check both the service and Slack connection; process startup alone is not a
 successful Slack connection.
 

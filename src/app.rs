@@ -243,7 +243,24 @@ fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Va
     let participated = db.participated(channel, thread)?;
     let input = match slack.normalize(payload, bot, config.defaults.mention, participated)? {
         Admission::Accept(input) => input,
-        Admission::Unconfigured { .. } | Admission::Ignore => return Ok(()),
+        Admission::Unconfigured { reply, id, setting } => {
+            let message = &config.slack.unconfigured_message;
+            if !message.is_empty() {
+                let ts = event["ts"].as_str().unwrap_or("");
+                let text =
+                    format!("{message}\n\nTo enable it, add `{id}` to `{setting}` in config.json.");
+                db.unconfigured(
+                    channel,
+                    ts,
+                    event["thread_ts"].as_str().filter(|t| *t != ts),
+                    event["text"].as_str().unwrap_or(""),
+                    &reply,
+                    formatting::messages(&text, false)?,
+                )?;
+            }
+            return Ok(());
+        }
+        Admission::Ignore => return Ok(()),
     };
     let command = input.text.trim();
     let is_command = matches!(command, "!clear" | "!stop" | "!status" | "!help");

@@ -14,9 +14,10 @@ enso service install
 enso service start
 ```
 
-Start by routing your own DMs: `"dms": {"U012345": "main"}`. Enso ignores
-conversations that `slack.dms` and `slack.channels` do not route to a workspace;
-each workspace is a directory where its conversations and jobs run. Each DM
+Start by routing your own DMs: `"dms": {"U012345": "main"}`. To learn your
+user ID, DM the bot: Enso runs nothing for a DM that `slack.dms` does not route
+(or an @mention in an unrouted channel) and replies with the ID to add.
+Each workspace is a directory where its conversations and jobs run. Each DM
 shares one session across its threads; channel threads get separate sessions. Messages in a busy conversation queue behind its current turn.
 Different jobs and conversations run in parallel with no global concurrency limit
 or setting. Scheduled occurrences of an already busy job are skipped.

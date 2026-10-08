@@ -2,7 +2,7 @@
 use crate::{config::Destination, slack::Incoming};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -58,6 +58,39 @@ pub fn now() -> i64 {
 }
 pub fn id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+fn event_key(channel: &str, ts: &str) -> String {
+    format!("{channel}:{ts}")
+}
+fn queue(
+    tx: &Transaction,
+    destination: &Destination,
+    payloads: Vec<Value>,
+    files: &[PathBuf],
+    run: Option<&str>,
+    background: bool,
+) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for mut payload in payloads {
+        let id = id();
+        payload["client_msg_id"] = json!(id);
+        let body = payload["text"].as_str().unwrap_or_default();
+        tx.execute("INSERT INTO messages(id,direction,run_id,channel,thread,body,payload,state,background,created_at) VALUES(?1,'out',?2,?3,?4,?5,?6,'pending',?7,?8)",params![id,run,destination.channel,destination.thread.as_deref().unwrap_or(""),body,payload.to_string(),background,now()])?;
+        ids.push(id);
+    }
+    for file in files {
+        let id = id();
+        let path = fs::canonicalize(file)?;
+        let body = format!(
+            "Attachment: {} ({})",
+            file.file_name().unwrap_or_default().to_string_lossy(),
+            path.display()
+        );
+        tx.execute("INSERT INTO messages(id,direction,run_id,channel,thread,body,payload,file_path,state,background,created_at) VALUES(?1,'out',?2,?3,?4,?5,'{}',?6,'pending',?7,?8)",params![id,run,destination.channel,destination.thread.as_deref().unwrap_or(""),body,path.to_string_lossy(),background,now()])?;
+        ids.push(id);
+    }
+    Ok(ids)
 }
 
 impl Db {
@@ -117,7 +150,7 @@ impl Db {
     pub fn accept(&self, incoming: &Incoming, command: bool) -> Result<Option<Accepted>> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let key = format!("{}:{}", incoming.channel, incoming.message_ts);
+        let key = event_key(&incoming.channel, &incoming.message_ts);
         if tx
             .query_row("SELECT 1 FROM messages WHERE event_key=?1", [&key], |_| {
                 Ok(())
@@ -348,27 +381,28 @@ impl Db {
         }
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut ids = Vec::new();
-        for mut payload in payloads {
-            let id = id();
-            payload["client_msg_id"] = json!(id);
-            let body = payload["text"].as_str().unwrap_or_default();
-            tx.execute("INSERT INTO messages(id,direction,run_id,channel,thread,body,payload,state,background,created_at) VALUES(?1,'out',?2,?3,?4,?5,?6,'pending',?7,?8)",params![id,run,destination.channel,destination.thread.as_deref().unwrap_or(""),body,payload.to_string(),background,now()])?;
-            ids.push(id);
-        }
-        for file in files {
-            let id = id();
-            let path = fs::canonicalize(file)?;
-            let body = format!(
-                "Attachment: {} ({})",
-                file.file_name().unwrap_or_default().to_string_lossy(),
-                path.display()
-            );
-            tx.execute("INSERT INTO messages(id,direction,run_id,channel,thread,body,payload,file_path,state,background,created_at) VALUES(?1,'out',?2,?3,?4,?5,'{}',?6,'pending',?7,?8)",params![id,run,destination.channel,destination.thread.as_deref().unwrap_or(""),body,path.to_string_lossy(),background,now()])?;
-            ids.push(id);
-        }
+        let ids = queue(&tx, destination, payloads, files, run, background)?;
         tx.commit()?;
         Ok(ids)
+    }
+    /// Records an event no route accepts and queues its reply, once per event key.
+    pub fn unconfigured(
+        &self,
+        channel: &str,
+        ts: &str,
+        thread: Option<&str>,
+        text: &str,
+        reply: &Destination,
+        payloads: Vec<Value>,
+    ) -> Result<bool> {
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if tx.execute("INSERT OR IGNORE INTO messages(id,direction,channel,thread,slack_ts,event_key,body,payload,state,created_at) VALUES(?1,'in',?2,?3,?4,?5,?6,'{}','ignored',?7)",params![id(),channel,thread.unwrap_or(""),ts,event_key(channel,ts),text,now()])? == 0 {
+            return Ok(false);
+        }
+        queue(&tx, reply, payloads, &[], None, false)?;
+        tx.commit()?;
+        Ok(true)
     }
     pub fn claim_delivery(&self) -> Result<Option<Delivery>> {
         let mut c = self.connect()?;

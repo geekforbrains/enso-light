@@ -1109,7 +1109,10 @@ fn admission_applies_the_configured_default_mention_mode() {
         &payload("1700000001.000001"),
     )
     .unwrap();
+    // A routed channel whose mention rule does not match stays silent.
     assert!(fixture.db.claim().unwrap().is_none());
+    assert!(fixture.replies().is_empty());
+    assert_eq!(fixture.count("messages"), 0);
     config.defaults.mention = crate::config::Mention::Never;
     accept_event(
         &fixture.db,
@@ -1122,30 +1125,205 @@ fn admission_applies_the_configured_default_mention_mode() {
     assert!(fixture.db.claim().unwrap().is_some());
 }
 
-#[test]
-fn unconfigured_and_unrouted_events_are_not_admitted() {
-    let fixture = Fixture::new(false);
-    for (channel, user, text) in [
-        ("DOTHER", "UOTHER", "hello"),
-        ("COTHER", "U1", "<@UBOT> hello"),
-        ("COTHER", "U1", "hello"),
-    ] {
-        let payload = json!({"event_id":"Ev1","event":{"type":"message","channel":channel,"user":user,"ts":"1700000001.000001","text":text}});
-        accept_event(
-            &fixture.db,
-            &fixture.slack,
-            &fixture.loaded.config,
-            "UBOT",
-            &payload,
-        )
-        .unwrap();
+fn event(
+    kind: &str,
+    channel: &str,
+    user: &str,
+    ts: &str,
+    thread: Option<&str>,
+    text: &str,
+) -> Value {
+    let mut payload = json!({"event_id":format!("Ev{kind}{ts}"),"event":{"type":kind,"channel":channel,"user":user,"ts":ts,"text":text}});
+    if let Some(thread) = thread {
+        payload["event"]["thread_ts"] = json!(thread);
     }
-    assert!(fixture.db.claim().unwrap().is_none());
-    assert!(fixture.db.claim_delivery().unwrap().is_none());
+    payload
+}
+
+impl Fixture {
+    fn admit(&self, config: &Config, payload: &Value) {
+        let slack = Slack::new(&config.slack, &Tokens::default()).unwrap();
+        accept_event(&self.db, &slack, config, "UBOT", payload).unwrap();
+    }
+
+    fn replies(&self) -> Vec<(Destination, String)> {
+        std::iter::from_fn(|| self.db.claim_delivery().unwrap())
+            .map(|d| {
+                (
+                    d.destination,
+                    d.payload["text"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn count(&self, table: &str) -> i64 {
+        rusqlite::Connection::open(self.home.path().join("enso.db"))
+            .unwrap()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+}
+
+#[test]
+fn unrouted_dms_get_one_reply_with_the_user_id_in_their_thread() {
+    let fixture = Fixture::new(false);
+    let config = &fixture.loaded.config;
+    let hint = "Enso isn't set up for this conversation.\n\nTo enable it, add `UOTHER` to `slack.dms` in config.json.";
+    for (ts, thread) in [
+        ("1700000001.000001", None),
+        ("1700000002.000001", Some("1700000001.000001")),
+    ] {
+        let mut payload = event("message", "DOTHER", "UOTHER", ts, thread, "hi");
+        payload["event"]["channel_type"] = json!("im");
+        fixture.admit(config, &payload);
+        fixture.admit(config, &payload);
+        let replies = fixture.replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].0.channel, "DOTHER");
+        assert_eq!(replies[0].0.thread.as_deref(), thread);
+        assert_eq!(replies[0].1, hint);
+    }
+    assert_eq!(fixture.count("conversations"), 0);
+    assert_eq!(fixture.count("runs"), 0);
+    assert_eq!(fixture.count("messages WHERE direction='in' AND state='ignored' AND conversation_id IS NULL AND run_id IS NULL"), 2);
+}
+
+#[test]
+fn unrouted_channels_reply_once_in_thread_only_when_mentioned() {
+    let fixture = Fixture::new(false);
+    let mut config = fixture.loaded.config.clone();
+    config.slack.unconfigured_message = "Not here.".into();
+    let config = &config;
+    let ts = "1700000001.000001";
+    fixture.admit(config, &event("message", "COTHER", "U1", ts, None, "hello"));
+    fixture.admit(
+        config,
+        &event(
+            "message",
+            "COTHER",
+            "U1",
+            "1700000001.000002",
+            Some(ts),
+            "hello",
+        ),
+    );
+    assert!(fixture.replies().is_empty());
+    // Slack delivers a channel mention as both a message and an app_mention.
+    for kind in ["message", "app_mention", "message"] {
+        fixture.admit(
+            config,
+            &event(
+                kind,
+                "COTHER",
+                "U1",
+                "1700000002.000001",
+                None,
+                "<@UBOT> hello",
+            ),
+        );
+    }
+    fixture.admit(
+        config,
+        &event(
+            "app_mention",
+            "COTHER",
+            "U1",
+            "1700000003.000001",
+            Some(ts),
+            "<@UBOT> hi",
+        ),
+    );
+    let replies = fixture.replies();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    for ((destination, text), thread) in replies.iter().zip(["1700000002.000001", ts]) {
+        assert_eq!(destination.channel, "COTHER");
+        assert_eq!(destination.thread.as_deref(), Some(thread));
+        assert_eq!(
+            text,
+            "Not here.\n\nTo enable it, add `COTHER` to `slack.channels` in config.json."
+        );
+    }
+    assert_eq!(fixture.count("conversations"), 0);
+    assert_eq!(fixture.count("runs"), 0);
     assert!(
         !fixture
+            .db
+            .participated("COTHER", "1700000002.000001")
+            .unwrap()
+    );
+}
+
+#[test]
+fn an_empty_unconfigured_message_disables_the_reply() {
+    let fixture = Fixture::new(false);
+    let mut config = fixture.loaded.config.clone();
+    config.slack.unconfigured_message = String::new();
+    fixture.admit(
+        &config,
+        &event(
+            "message",
+            "DOTHER",
+            "UOTHER",
+            "1700000001.000001",
+            None,
+            "hi",
+        ),
+    );
+    fixture.admit(
+        &config,
+        &event(
+            "app_mention",
+            "COTHER",
+            "U1",
+            "1700000002.000001",
+            None,
+            "<@UBOT> hi",
+        ),
+    );
+    assert!(fixture.replies().is_empty());
+    assert_eq!(fixture.count("messages"), 0);
+}
+
+#[test]
+fn routing_a_channel_later_admits_new_messages_but_not_replayed_events() {
+    let fixture = Fixture::new(false);
+    let mut config = fixture.loaded.config.clone();
+    let first = event(
+        "app_mention",
+        "COTHER",
+        "U1",
+        "1700000001.000001",
+        None,
+        "<@UBOT> hi",
+    );
+    fixture.admit(&config, &first);
+    assert_eq!(fixture.replies().len(), 1);
+    config.slack.channels.insert(
+        "COTHER".into(),
+        crate::config::ChannelRoute::Workspace("main".into()),
+    );
+    // A redelivery of the event that already got the setup reply stays handled.
+    fixture.admit(&config, &first);
+    assert!(fixture.db.claim().unwrap().is_none());
+    fixture.admit(
+        &config,
+        &event(
+            "message",
+            "COTHER",
+            "U1",
+            "1700000002.000001",
+            Some("1700000001.000001"),
+            "<@UBOT> again",
+        ),
+    );
+    let run = fixture.db.claim().unwrap().unwrap();
+    assert_eq!(run.request, "again");
+    assert!(
+        fixture
             .db
             .participated("COTHER", "1700000001.000001")
             .unwrap()
     );
+    assert!(fixture.replies().is_empty());
 }

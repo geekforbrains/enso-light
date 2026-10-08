@@ -25,6 +25,11 @@ Versioning and publication follow the [release flow](docs/releases.md).
   [Slack routing](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#slack).
 - `!status` shows the conversation's workspace; the run context and stored run
   settings include the workspace name and path.
+- An unrouted DM, or an @mention in an unrouted channel, gets one reply with
+  the user or channel ID to add to `slack.dms` or `slack.channels`. Customize
+  the text with `slack.unconfigured_message`, or set it to `""` to stay silent.
+  See
+  [unconfigured conversations](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#unconfigured-conversations).
 
 ### Changed
 
