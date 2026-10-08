@@ -557,7 +557,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(scope.contains("Add users:read") && scope.contains("bot token"));
+        assert!(scope.contains("Add users:read") && scope.contains("for SLACK_BOT_TOKEN"));
         assert!(scope.contains("reinstall"));
         let scope = execute(command(&["users"]), slack.clone())
             .await

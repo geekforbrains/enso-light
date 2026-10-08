@@ -190,7 +190,7 @@ impl Slack {
 
     pub(crate) async fn search_messages(&self, params: &Value) -> Result<Value> {
         let token = self.tokens.user.as_deref().filter(|token| !token.trim().is_empty())
-            .context("Workspace search requires SLACK_USER_TOKEN with search:read. Set it in .env, or use search --channel CHANNEL to search one bot-accessible history page.")?;
+            .context("Workspace search requires SLACK_USER_TOKEN with search:read. Set it in .env, or page through enso slack history or thread instead.")?;
         let response = self
             .request_with_token("search.messages", params, token)
             .await?;
@@ -565,10 +565,10 @@ fn check_api(method: &str, value: &Value) -> Result<()> {
         .unwrap_or("unknown_error");
     if code == "missing_scope" {
         // Slack names the missing scope; echo it only when it looks like scope names.
-        let token = if method == "search.messages" {
-            "SLACK_USER_TOKEN"
-        } else {
-            "bot token"
+        let token = match method {
+            "search.messages" => "SLACK_USER_TOKEN",
+            "apps.connections.open" => "SLACK_APP_TOKEN",
+            _ => "SLACK_BOT_TOKEN",
         };
         let scope = value["needed"]
             .as_str()
@@ -580,7 +580,7 @@ fn check_api(method: &str, value: &Value) -> Result<()> {
             })
             .unwrap_or("the needed scope");
         bail!(
-            "Slack {method} failed (missing_scope). Add {scope} to the Slack app's {token} scopes, then reinstall the app."
+            "Slack {method} failed (missing_scope). Add {scope} to the Slack app's scopes for {token}, then reinstall the app."
         );
     }
     if matches!(

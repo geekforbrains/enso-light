@@ -33,7 +33,6 @@ pub struct Run {
     pub trigger: String,
     pub occurrence: Option<String>,
     pub request: String,
-    pub created_at: i64,
     pub input: Value,
     pub session: Option<String>,
 }
@@ -247,7 +246,7 @@ impl Db {
     pub fn claim(&self) -> Result<Option<Run>> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let run=tx.query_row("SELECT r.id,r.kind,r.conversation_id,r.job_name,r.trigger,r.request,r.created_at,coalesce(m.payload,'{}'),c.session_id,r.occurrence FROM runs r LEFT JOIN conversations c ON c.id=r.conversation_id LEFT JOIN messages m ON m.run_id=r.id AND m.direction='in' WHERE r.state='queued' AND NOT EXISTS(SELECT 1 FROM runs active WHERE active.state='running' AND ((active.conversation_id IS NOT NULL AND active.conversation_id=r.conversation_id) OR (active.job_name IS NOT NULL AND active.job_name=r.job_name))) ORDER BY r.created_at,r.rowid LIMIT 1",[],|r|Ok(Run{id:r.get(0)?,kind:r.get(1)?,conversation:r.get(2)?,job:r.get(3)?,trigger:r.get(4)?,request:r.get(5)?,created_at:r.get(6)?,input:serde_json::from_str(&r.get::<_,String>(7)?).unwrap_or(Value::Null),session:r.get(8)?,occurrence:r.get(9)?})).optional()?;
+        let run=tx.query_row("SELECT r.id,r.kind,r.conversation_id,r.job_name,r.trigger,r.request,coalesce(m.payload,'{}'),c.session_id,r.occurrence FROM runs r LEFT JOIN conversations c ON c.id=r.conversation_id LEFT JOIN messages m ON m.run_id=r.id AND m.direction='in' WHERE r.state='queued' AND NOT EXISTS(SELECT 1 FROM runs active WHERE active.state='running' AND ((active.conversation_id IS NOT NULL AND active.conversation_id=r.conversation_id) OR (active.job_name IS NOT NULL AND active.job_name=r.job_name))) ORDER BY r.created_at,r.rowid LIMIT 1",[],|r|Ok(Run{id:r.get(0)?,kind:r.get(1)?,conversation:r.get(2)?,job:r.get(3)?,trigger:r.get(4)?,request:r.get(5)?,input:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or(Value::Null),session:r.get(7)?,occurrence:r.get(8)?})).optional()?;
         if let Some(r) = &run {
             tx.execute(
                 "UPDATE runs SET state='running',started_at=?2 WHERE id=?1",

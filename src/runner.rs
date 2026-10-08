@@ -35,7 +35,8 @@ pub struct Outcome {
 }
 
 /// A failed CLI turn. It displays only a short message, which is safe for Slack and
-/// run records; `detail` holds the tail of the CLI's own output for the service log.
+/// run records; `detail` holds the CLI's own last lines (stderr, then any error
+/// events from stdout) for the service log, unredacted.
 #[derive(Debug)]
 pub struct Failure {
     pub message: String,
@@ -85,9 +86,18 @@ pub async fn execute(request: Request, cancel: CancellationToken) -> Result<Outc
             || output.status.to_string(),
             |code| format!("status {code}"),
         );
+        // Both CLIs exit non-zero on most failures and explain them in a stdout event.
+        let events: Vec<&str> = output
+            .stdout
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<Value>(line)
+                    .is_ok_and(|event| is_error(&request.settings.cli, &event))
+            })
+            .collect();
         return Err(failure(
             format!("{} exited with {status}", request.settings.cli),
-            &output.stderr,
+            &format!("{}\n{}", output.stderr, events.join("\n")),
         ));
     }
     parse_output(
@@ -199,6 +209,9 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
             );
             session_id = Some(id.into());
         }
+        if is_error(cli, &event) {
+            return Err(failure(format!("{cli} reported an error"), line));
+        }
         match (cli, kind) {
             ("codex", "item.completed") if event["item"]["type"] == "agent_message" => {
                 text = event["item"]["text"]
@@ -210,13 +223,7 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
                 ensure!(!completed, "invalid_output: CLI emitted multiple results");
                 completed = true;
             }
-            ("codex", "turn.failed" | "error") => {
-                return Err(failure("codex reported an error".into(), line));
-            }
             ("claude", "result") => {
-                if event["is_error"].as_bool().unwrap_or(false) || event["subtype"] != "success" {
-                    return Err(failure("claude reported an error".into(), line));
-                }
                 ensure!(!completed, "invalid_output: CLI emitted multiple results");
                 text = event["result"]
                     .as_str()
@@ -224,7 +231,6 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
                     .into();
                 completed = true;
             }
-            ("claude", "error") => return Err(failure("claude reported an error".into(), line)),
             _ => {}
         }
     }
@@ -237,6 +243,16 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
         "invalid_output: CLI returned no resumable session ID"
     );
     Ok(Outcome { text, session_id })
+}
+
+fn is_error(cli: &str, event: &Value) -> bool {
+    match (cli, event["type"].as_str()) {
+        ("codex", Some("turn.failed" | "error")) | ("claude", Some("error")) => true,
+        ("claude", Some("result")) => {
+            event["is_error"].as_bool().unwrap_or(false) || event["subtype"] != "success"
+        }
+        _ => false,
+    }
 }
 
 /// Builds a failure from the CLI's output. Slack users only need to know when to
@@ -256,11 +272,10 @@ fn failure(message: String, output: &str) -> anyhow::Error {
     } else {
         format!("{message}; see enso service logs")
     };
+    // Keep the end, which is where CLIs explain the failure. The log caps its length
+    // after redacting, so a secret is never cut in half first.
     let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-    let tail = lines[lines.len().saturating_sub(20)..].join("\n");
-    // Keep the end, which is where CLIs explain the failure.
-    let skip = tail.chars().count().saturating_sub(1800);
-    let detail = tail.chars().skip(skip).collect();
+    let detail = lines[lines.len().saturating_sub(20)..].join("\n");
     Failure { message, detail }.into()
 }
 
@@ -602,6 +617,41 @@ mod tests {
         );
         let detail = &error.downcast_ref::<Failure>().unwrap().detail;
         assert!(detail.starts_with("line 11\n") && detail.ends_with("line 30"));
+        // Codex explains most failures only on stdout, with nothing on stderr.
+        let quiet = request(
+            temp.path(),
+            "codex",
+            r#"cat >/dev/null
+echo '{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000001"}'
+echo '{"type":"error","message":"model is not supported"}'
+echo '{"type":"turn.failed","error":{"message":"model is not supported"}}'
+exit 1"#,
+        );
+        let error = execute(quiet, CancellationToken::new()).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "codex exited with status 1; see enso service logs"
+        );
+        let detail = &error.downcast_ref::<Failure>().unwrap().detail;
+        assert!(detail.starts_with(r#"{"type":"error","message":"model is not supported"}"#));
+        assert!(detail.ends_with(r#"{"message":"model is not supported"}}"#));
+        assert!(!detail.contains("thread.started"));
+        let claude = request(
+            temp.path(),
+            "claude",
+            r#"cat >/dev/null
+echo '[claude-code:unrecognized_model]' >&2
+echo '{"type":"result","subtype":"success","is_error":true,"result":"unknown model"}'
+exit 1"#,
+        );
+        let detail = execute(claude, CancellationToken::new())
+            .await
+            .unwrap_err()
+            .downcast::<Failure>()
+            .unwrap()
+            .detail;
+        assert!(detail.starts_with("[claude-code:unrecognized_model]\n"));
+        assert!(detail.ends_with(r#""result":"unknown model"}"#));
         let missing = request(
             temp.path(),
             "claude",

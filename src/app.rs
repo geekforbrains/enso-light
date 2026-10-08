@@ -46,14 +46,24 @@ pub fn is_running(home: &Path) -> bool {
     };
     file.try_lock_exclusive().is_err()
 }
-fn redact(error: &str, loaded: &Loaded) -> String {
-    let mut result = error.to_owned();
+fn scrub(text: &str, loaded: &Loaded) -> String {
+    let mut result = text.to_owned();
     for secret in loaded.env.values().chain(loaded.tokens.secrets()) {
         if secret.len() >= 4 {
             result = result.replace(secret, "[redacted]");
         }
     }
-    result.chars().take(2000).collect()
+    result
+}
+fn redact(error: &str, loaded: &Loaded) -> String {
+    scrub(error, loaded).chars().take(2000).collect()
+}
+/// The end of a CLI's failure output for the service log. Redacting before cutting
+/// means a secret is never split, leaving half of it unrecognized.
+fn log_tail(detail: &str, loaded: &Loaded) -> String {
+    let scrubbed = scrub(detail, loaded);
+    let skip = scrubbed.chars().count().saturating_sub(1800);
+    scrubbed.chars().skip(skip).collect()
 }
 
 struct Event {
@@ -619,7 +629,7 @@ async fn execute_inner(
                         "Run {} {} output:\n{}",
                         work.id,
                         settings.cli,
-                        redact(&failure.detail, loaded)
+                        log_tail(&failure.detail, loaded)
                     );
                 }
                 let error = redact(&format!("{error:#}"), loaded);

@@ -22,6 +22,11 @@ fn runtime_errors_redact_literal_search_credentials_and_environment_values() {
         ),
         "failure: [redacted] [redacted] [redacted] [redacted]",
     );
+    // A secret straddling the log's length cap is redacted whole before the cut.
+    let detail = format!("fake-provider-credential{}", "x".repeat(1790));
+    let tail = log_tail(&detail, &loaded);
+    // Cutting first would have kept "credential" followed by the padding.
+    assert_eq!(tail, format!("[redacted]{}", "x".repeat(1790)));
 }
 
 struct Fixture {

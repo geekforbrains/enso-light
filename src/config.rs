@@ -429,7 +429,7 @@ pub fn check(home: &Path) -> Check {
             if config.providers.values().any(|p| p.cli == "codex")
                 && fs::symlink_metadata(home.join(".git")).is_err()
             {
-                check.notes.push("the Enso home is not a git repository, so Codex will not load the shared AGENTS.md and .agents/skills; run enso init or git init in the home".into());
+                check.notes.push("the Enso home is not a git repository, so Codex will not run in its workspaces unless they are trusted in your Codex configuration, and will not load the shared AGENTS.md and .agents/skills; run enso init or git init in the home".into());
             }
             match crate::jobs::list(home, config) {
                 Ok(jobs) => {
@@ -488,7 +488,7 @@ pub fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result
                 )
             }
         })?;
-    // One spelling per directory, so session pins and dedup agree on equal paths.
+    // One spelling per directory, so equal paths compare equal.
     for workspace in config.workspaces.values_mut() {
         workspace.path = workspace.path.components().collect();
     }
@@ -661,7 +661,7 @@ pub fn git_init(home: &Path) -> Option<String> {
         Err(error) => format!("cannot run git: {error}"),
     };
     Some(format!(
-        "{problem}. Codex needs the Enso home to be a git repository to load its shared AGENTS.md and .agents/skills; install git and run git init in {}.",
+        "{problem}. Codex needs the Enso home to be a git repository to run in its workspaces without trusting each one and to load its shared AGENTS.md and .agents/skills; install git and run git init in {}.",
         home.display()
     ))
 }

@@ -255,7 +255,7 @@ fn init_creates_a_git_home_with_shared_guidance_and_a_starter_workspace() {
     .unwrap();
     let (code, report, _) = check(home);
     assert_eq!(code, Some(0), "{report}");
-    assert!(!has(&report["notes"], "Codex will not load"), "{report}");
+    assert!(!has(&report["notes"], "Codex will not run"), "{report}");
 }
 
 #[test]
@@ -388,7 +388,7 @@ fn config_check_reports_every_error_and_note_at_once() {
     let notes = &report["notes"];
     for message in [
         r#"no dms or channels are configured; Enso will reply "not configured" to every message"#,
-        "Codex will not load the shared AGENTS.md",
+        "Codex will not run in its workspaces",
     ] {
         assert!(has(notes, message), "{message}: {notes:#}");
     }

@@ -30,7 +30,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Create the missing Enso home layout, git repository, and configured workspaces.
+    /// Create the missing starter files and git repository; a new config.json also gets workspaces/main.
     Init,
     /// Run the foreground service.
     Run,
@@ -288,7 +288,6 @@ async fn execute(cli: Cli) -> Result<()> {
                     &body,
                     &std::fs::read_to_string(path).context("Cannot read blocks file")?,
                 )?],
-                None if body.trim().is_empty() => Vec::new(),
                 None => formatting::messages(&body, plain)?,
             };
             let ids = db.outgoing(&destination, payloads, &files, run.as_deref(), true)?;
