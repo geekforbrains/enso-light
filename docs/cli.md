@@ -96,8 +96,8 @@ problem at once instead of stopping at the first:
 `errors` covers blank or unknown provider CLIs and names, unknown workspace and
 provider references in workspaces, routes, and jobs, relative workspace paths, a
 workspace path that is not a directory, invalid route keys and job names, unknown
-`mention` modes, zero timeouts, blank `SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN`,
-each invalid job, and an `enso.db` from an older release, which it reads
+`mention` modes, zero timeouts, a blank `slack.working_reaction`, blank
+`SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN`, each invalid job, and an `enso.db` from an older release, which it reads
 without changing.
 `notes` are not errors: no configured `dms` or `channels`, or a Codex provider
 while the home is not a git repository. With an empty `slack.unconfigured_message`, the no-routes
@@ -106,12 +106,13 @@ valid or not. A `config.json` that cannot be loaded at all is reported as one
 error; `providers` and `workspaces` are then 0, and jobs are not validated.
 The report never includes token values or other substituted values. The
 command exits non-zero when there are errors, ending with an error such as
-`config check found 3 errors`. `service install` checks what service startup
-needs: it loads the configuration with only the environment the service will
+`config check found 3 errors`. `service install` checks only the configuration
+and tokens: it loads the configuration with only the environment the service will
 have (`.env` plus `HOME`, `PATH`, and a few CLI variables) and refuses on any
 configuration or token error, so a `${NAME}` that only your shell defines must
 be set in `.env`. Invalid jobs and missing workspace directories do not block
-it; they fail only their own runs.
+it; they fail only their own runs. It does not check `enso.db`; service startup
+refuses one from an older release.
 
 `jobs list` shows each valid job's `enabled`, `cron`, `next_run`, and
 `last_run`, and each [invalid job](jobs.md#invalid-jobs) as

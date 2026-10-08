@@ -12,12 +12,25 @@ Versioning and publication follow the [release flow](docs/releases.md).
    and [`enso` skill](https://github.com/geekforbrains/enso-light/blob/main/bundled/SKILL.md)
    into `~/.enso/AGENTS.md` and `~/.enso/.agents/skills/enso/SKILL.md` by hand.
    Enso no longer adds this guidance in code, so without the merge agents lose it.
-2. Hooks that read `.workspace.path`, `.run_id`, `.provider`, or
-   `.notification_target` from stdin switch to `$ENSO_WORKSPACE`,
-   `$ENSO_RUN_ID`, and `$ENSO_CHANNEL` / `$ENSO_THREAD_TS`.
+2. Update hooks that read removed fields from stdin: `.workspace.path` is
+   `$ENSO_WORKSPACE`, `.run_id` is `$ENSO_RUN_ID`, `.notification_target` and
+   `.reply` are `$ENSO_CHANNEL` and `$ENSO_THREAD_TS`, and `.job.directory` is
+   the hook's working directory. `.workspace.name`, `.provider`,
+   `.received_at`, `.started_at`, `.conversation_id`, and `.background_ids`
+   have no replacement; the job's `job.json` names its workspace and provider.
 3. Create any configured workspace directory that does not exist yet, as in
    [adding a workspace](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#adding-a-workspace);
    `enso config check` lists them.
+4. A workspace without the home's shared layer (one outside the Enso home, or
+   for Codex one that is its own git repository) now gets no Enso guidance at
+   all. Copy or link `AGENTS.md` and the `enso` skill into it if its agent
+   should know how to use Enso.
+5. For a Codex workspace that is not in a git repository or a folder trusted
+   in your Codex configuration, add `--skip-git-repo-check` to the provider's
+   `args` or trust the folder.
+6. Change scripts and skills that call `enso slack search --channel` or
+   `--thread` to put `in:channel_name` in the query, or to page through
+   `enso slack history` and `enso slack thread`.
 
 ### Changed
 
@@ -30,8 +43,8 @@ Versioning and publication follow the [release flow](docs/releases.md).
   `channel`, `message_ts`, `thread_ts`, and `attachments` for Slack turns; and
   `job` (`name`, `trigger`, `scheduled_for`) for jobs. `run_id`, `provider`,
   `workspace`, `received_at`, `started_at`, `conversation_id`, `reply`,
-  `notification_target`, and `job.directory` are gone; use the `ENSO_*`
-  variables and the working directory.
+  `notification_target`, `background_ids`, and `job.directory` are gone; use
+  the `ENSO_*` variables and the working directory.
 - **Breaking:** Codex runs no longer get `--skip-git-repo-check`. Workspaces
   inside the Enso home are in its git repository; for a Codex workspace
   elsewhere, trust the folder in Codex or add `--skip-git-repo-check` to the
@@ -47,16 +60,19 @@ Versioning and publication follow the [release flow](docs/releases.md).
   the rest.
 - A failed turn reports that the CLI exited with a status or reported an error,
   instead of a guessed category such as `authentication_failed`. The end of the
-  CLI's output now goes to the service log, with secrets redacted; a session
-  that cannot be resumed still says to use `!clear`.
+  CLI's stderr and any error events it printed on stdout now go to the service
+  log, with secrets redacted; a session that cannot be resumed still says to
+  use `!clear`.
 - A Slack `missing_scope` error names the scope Slack reports as missing and the
-  token that needs it, instead of Enso's own per-method list.
-- `enso init` prints one fixed next step and no longer reads an existing
-  `config.json`, `.env`, or `enso.db` or creates the database; the service
-  creates it on start.
-- `enso service install` checks only what service startup needs: the
-  configuration and Slack tokens as the service will load them. An invalid job
-  no longer blocks installing.
+  token that needs it (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, or
+  `SLACK_USER_TOKEN`), instead of Enso's own per-method list.
+- `enso init` prints one fixed next step, drops `workspaces_created` from its
+  output, and no longer reads an existing `config.json`, `.env`, or `enso.db`
+  or creates the database; the service creates it on start.
+- `enso service install` validates only the configuration and Slack tokens as
+  the service will load them. An invalid job no longer blocks installing, and
+  neither does an `enso.db` from an older release, which service startup still
+  refuses.
 - Workspace names may use any characters; job names still use letters,
   numbers, hyphens, and underscores.
 - An invalid `job.json` reports the JSON parser's own message.

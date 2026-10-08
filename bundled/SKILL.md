@@ -6,7 +6,7 @@ description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, an
 # Enso
 
 The `enso` CLI reaches Slack and jobs from inside a run. Enso sets
-`$ENSO_WORKSPACE` (your working directory), `$ENSO_SOURCE` (`slack` or `job`),
+`$ENSO_HOME` (the Enso home), `$ENSO_WORKSPACE` (your working directory), `$ENSO_SOURCE` (`slack` or `job`),
 `$ENSO_RUN_ID`, `$ENSO_JOB`, and `$ENSO_CHANNEL` and `$ENSO_THREAD_TS`: this
 Slack conversation, or the job's `notify` destination. Incoming attachments are
 under `$ENSO_WORKSPACE/uploads/$ENSO_RUN_ID/`.
@@ -46,9 +46,10 @@ enso message send "Weekly metrics: signups up 12%" --blocks metrics.json
 Without `--to`, messages go to `$ENSO_CHANNEL` and `$ENSO_THREAD_TS`; a job
 without `notify` must name `--to`. Find other IDs with `enso slack channels`.
 "Here" means `$ENSO_CHANNEL`, and its thread only when the user means this
-thread. Use `--file PATH` repeatedly to attach files; `--text-file PATH` or
-stdin supplies the text. Text is standard Markdown; Slack renders it, including
-tables. The service must be running.
+thread. Use `--file PATH` repeatedly to attach files. Give the text as an
+argument, with `--text-file PATH`, or as `-` to read it from stdin. Text is
+standard Markdown; Slack renders it, including tables. The service must be
+running.
 
 When Markdown cannot express what you need, such as native charts
 (`data_visualization`) or sortable tables (`data_table`), write Block Kit JSON
@@ -94,8 +95,9 @@ Details: https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md
 `$ENSO_HOME/AGENTS.md` and `$ENSO_HOME/.agents/skills/` apply to every
 workspace inside the Enso home; a workspace's own `AGENTS.md` and
 `.agents/skills/` apply only to it, so put a skill there when only it needs one.
-`CLAUDE.md` and `.claude/skills` link to the same files for Claude Code. Enso
-never creates workspace folders; to add a workspace, follow
+`CLAUDE.md` and `.claude/skills` link to the same files for Claude Code. Apart
+from the starter `main` that `enso init` writes, Enso never creates workspace
+folders; to add a workspace, follow
 https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#adding-a-workspace
 
 ## Configuration and status

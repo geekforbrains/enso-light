@@ -107,9 +107,14 @@ Both CLIs run with your normal configuration, as in a terminal opened in the
 workspace: your `~/.claude` or `~/.codex` settings, skills, plugins, and
 instructions apply. Grant unattended permissions there or through provider
 `args`, such as `--dangerously-skip-permissions`. Enso adds only what it needs to
-run a turn and read the reply: `--print --verbose --output-format stream-json`
-for Claude Code or `exec --json` for Codex, then your `args`, the model, the
-effort, and the session to resume.
+run a turn and read the reply, with your `args` right after the first group:
+
+| CLI | Enso adds |
+|---|---|
+| Claude Code | `--print --verbose --output-format stream-json`, `--model M`, `--effort E`, `--resume ID` |
+| Codex | `exec --json`, `--model M`, `--config model_reasoning_effort="E"`, `resume ID`, `--image PATH` for each PNG, JPEG, or WebP attachment followed by `--`, and `-` to read the prompt from stdin |
+
+The model, effort, and resume flags appear only when set or resuming.
 
 Codex refuses to run outside a git repository or a folder trusted in your Codex
 configuration. Workspaces inside the Enso home are in its repository; for a
@@ -132,10 +137,11 @@ Enso user.
 
 #### Adding a workspace
 
-Enso never creates workspace folders. `config check` reports a configured path
-that is not a directory, and runs routed to it fail until it exists. To add a
-workspace, create its directory, add it to `workspaces` and a route, and run
-`enso service restart`. Inside the Enso home, give it the same layout as `main`
+Apart from the starter `workspaces/main` that `enso init` writes with a new
+`config.json`, Enso never creates workspace folders. `config check` reports a
+configured path that is not a directory, and runs routed to it fail until it
+exists. To add a workspace, create its directory, add it to `workspaces` and a
+route, and run `enso service restart`. Inside the Enso home, give it the same layout as `main`
 so Claude Code and Codex share its instructions and skills:
 
 ```sh
@@ -250,9 +256,9 @@ Other optional Slack settings:
 
 | Field | Default / purpose |
 |---|---|
-| `working_reaction` | `thinking_face` |
-| `queued_message` | Acknowledges a turn queued behind another |
-| `timeout_message` | Explains that a turn timed out |
+| `working_reaction` | `thinking_face`; must not be blank |
+| `queued_message` | Acknowledges a turn queued behind another; `""` sends nothing |
+| `timeout_message` | Explains that a turn timed out; `""` sends nothing |
 | `unconfigured_message` | Opens the reply to an unrouted conversation; `""` disables it |
 
 ## Environment
