@@ -11,9 +11,8 @@ conversations, native session references, messages, attachments, run status,
 delivery status, and scheduling cursors. Native CLIs own authentication, tools,
 permissions, and their underlying session files. Each agent runs in a
 configured workspace directory: the workspace a Slack conversation is routed to,
-or the job's `workspace`. Service startup creates missing workspace directories
-with starter instructions and skill links; existing directories are left as
-they are. Hooks run in their job directory. Incoming attachments
+or the job's `workspace`. Enso never creates workspace directories; a run in a
+missing one fails. Hooks run in their job directory. Incoming attachments
 are saved under the workspace's `uploads/<run-id>/`. Enso adds no settings overrides;
 each CLI loads its own configuration as usual.
 

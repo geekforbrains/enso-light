@@ -72,12 +72,6 @@ pub fn upgrade_installed(home: &Path, executable: &Path) -> Result<bool> {
 }
 
 pub fn install(home: &Path) -> Result<Value> {
-    let check = crate::config::check(home);
-    ensure!(
-        check.valid,
-        "enso config check found problems; fix them before installing: {}",
-        check.errors.join("; ")
-    );
     let service = service(home)?;
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let mut environment = BTreeMap::new();
@@ -99,21 +93,15 @@ pub fn install(home: &Path) -> Result<Value> {
     if environment.get("PATH").is_none_or(String::is_empty) {
         bail!("PATH must contain your authenticated agent CLI when installing");
     }
-    // The service sees only these variables and .env, not the installing shell.
-    let loaded = crate::config::load_with(&service.home, environment.clone()).map_err(|error| {
-        anyhow::anyhow!(
-            "{error:#}; set it in .env, because the installed service does not inherit your shell environment"
-        )
-    })?;
-    for (name, value) in [
-        ("SLACK_BOT_TOKEN", &loaded.tokens.bot),
-        ("SLACK_APP_TOKEN", &loaded.tokens.app),
-    ] {
-        ensure!(
-            !value.trim().is_empty(),
-            "{name} is blank in .env; the installed service reads Slack tokens only from .env"
-        );
-    }
+    // Check what the service will load at startup: these variables and .env only,
+    // not the installing shell. Invalid jobs and missing workspaces fail only their runs.
+    crate::config::load_with(&service.home, environment.clone())
+        .and_then(|loaded| loaded.validate())
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{error:#}; the installed service reads only .env, not your shell environment"
+            )
+        })?;
     fs::create_dir_all(service.home.join("logs"))?;
     fs::create_dir_all(service.file.parent().context("invalid service file path")?)?;
     let rendered = if cfg!(target_os = "macos") {

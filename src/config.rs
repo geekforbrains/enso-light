@@ -221,14 +221,6 @@ fn route_key(key: &str, prefixes: &[u8]) -> bool {
     key == "*" || slack_id(key, prefixes)
 }
 
-/// Letters, digits, hyphens, and underscores, as for job names.
-pub fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -278,11 +270,6 @@ impl Config {
             errors.push("workspaces must define at least one workspace".into());
         }
         for (name, workspace) in &self.workspaces {
-            if !valid_name(name) {
-                errors.push(format!(
-                    "workspace name {name:?} may contain only letters, numbers, hyphens, and underscores"
-                ));
-            }
             if !workspace.path.is_absolute() {
                 errors.push(format!(
                     "workspaces.{name}.path must be absolute; use ${{ENSO_HOME}}/... for paths inside the Enso home"
@@ -380,14 +367,6 @@ fn blank_token(name: &str) -> String {
     format!("{name} is blank; set it in .env")
 }
 
-/// Whether an error is one of the blanks `enso init` leaves for the user to fill in.
-pub fn is_starter_blank(error: &str) -> bool {
-    error == blank_cli("main")
-        || ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]
-            .into_iter()
-            .any(|name| error == blank_token(name))
-}
-
 #[derive(Clone, Debug)]
 pub struct Loaded {
     pub config: Config,
@@ -439,12 +418,12 @@ pub fn check(home: &Path) -> Check {
                     "no dms or channels are configured; Enso will reply \"not configured\" to every message".into()
                 });
             }
-            // An invalid name is already an error; don't also promise to create it.
-            for (name, workspace) in config.workspaces.iter().filter(|(n, _)| valid_name(n)) {
-                match missing_workspace(name, &workspace.path) {
-                    Ok(false) => {}
-                    Ok(true) => check.notes.push(format!("workspaces.{name}.path does not exist yet; it will be created on init or service start")),
-                    Err(error) => check.errors.push(format!("{error:#}")),
+            // A relative path is already an error.
+            for (name, workspace) in &config.workspaces {
+                if workspace.path.is_absolute() && !workspace.path.is_dir() {
+                    check.errors.push(format!(
+                        "workspaces.{name}.path is not a directory; create it or fix the path"
+                    ));
                 }
             }
             if config.providers.values().any(|p| p.cli == "codex")
@@ -580,7 +559,9 @@ pub fn expand(input: &str, variables: &BTreeMap<String, String>) -> Result<Strin
 }
 
 /// Creates the Enso home's missing files and directories; never overwrites.
+/// The starter `workspaces/main` comes only with the starter config that names it.
 pub fn init(home: &Path) -> Result<()> {
+    let starter = !home.join("config.json").exists();
     for dir in [
         "",
         ".agents",
@@ -607,7 +588,19 @@ pub fn init(home: &Path) -> Result<()> {
     ] {
         create_file(&home.join(path), content)?;
     }
-    link_guidance(home)
+    link_guidance(home)?;
+    if starter {
+        let main = home.join("workspaces/main");
+        for dir in ["", ".agents", ".agents/skills", ".claude"] {
+            create_dir(&main.join(dir))?;
+        }
+        create_file(
+            &main.join("AGENTS.md"),
+            include_str!("../bundled/WORKSPACE.md"),
+        )?;
+        link_guidance(&main)?;
+    }
+    Ok(())
 }
 
 /// Claude Code reads the same instructions and skills as Codex through links.
@@ -673,58 +666,6 @@ pub fn git_init(home: &Path) -> Option<String> {
     ))
 }
 
-/// Whether an absolute workspace path still has to be created; an error when it
-/// cannot be used. A relative path is a validation error reported elsewhere.
-fn missing_workspace(name: &str, path: &Path) -> Result<bool> {
-    if !path.is_absolute() {
-        return Ok(false);
-    }
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.is_dir() => Ok(false),
-        Ok(_) => bail!("workspaces.{name}.path exists but is not a directory"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(error) => bail!(
-            "workspaces.{name}.path cannot be inspected: {}",
-            error.kind()
-        ),
-    }
-}
-
-/// Creates each configured workspace whose directory does not exist, with starter
-/// instructions and skill links. Existing directories are never modified.
-/// Returns the created paths and one error per workspace that could not be created.
-pub fn scaffold(config: &Config) -> (Vec<PathBuf>, Vec<String>) {
-    let (mut missing, mut errors) = (Vec::new(), Vec::new());
-    for (name, workspace) in &config.workspaces {
-        match missing_workspace(name, &workspace.path) {
-            Ok(true) => missing.push((&workspace.path, name)),
-            Ok(false) => {}
-            Err(error) => errors.push(format!("{error:#}")),
-        }
-    }
-    // Parents first, so a nested workspace never leaves its parent unscaffolded.
-    missing.sort_by_key(|(path, _)| *path);
-    missing.dedup_by_key(|(path, _)| *path);
-    let mut created = Vec::new();
-    for (path, name) in missing {
-        let result = (|| {
-            for dir in ["", ".agents", ".agents/skills", ".claude"] {
-                create_dir(&path.join(dir))?;
-            }
-            create_file(
-                &path.join("AGENTS.md"),
-                &include_str!("../bundled/WORKSPACE.md").replace("{{name}}", name),
-            )?;
-            link_guidance(path)
-        })();
-        match result {
-            Ok(()) => created.push(path.clone()),
-            Err(error) => errors.push(format!("workspaces.{name}: {error:#}")),
-        }
-    }
-    (created, errors)
-}
-
 fn create_file(path: &Path, content: &str) -> Result<()> {
     match OpenOptions::new()
         .write(true)
@@ -743,7 +684,6 @@ fn create_file(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn expansion_is_literal_once_and_requires_variables() {
@@ -802,7 +742,22 @@ mod tests {
         ] {
             assert_eq!(mode(&home.join(file)), 0o600, "{file}");
         }
-        assert_guidance_links(&home);
+        let main = home.join("workspaces/main");
+        for dir in [
+            "workspaces",
+            "workspaces/main",
+            "workspaces/main/.agents/skills",
+        ] {
+            assert_eq!(mode(&home.join(dir)), 0o700, "{dir}");
+        }
+        assert_eq!(mode(&main.join("AGENTS.md")), 0o600);
+        assert_eq!(
+            fs::read_to_string(main.join("AGENTS.md")).unwrap(),
+            include_str!("../bundled/WORKSPACE.md")
+        );
+        for root in [&home, &main] {
+            assert_guidance_links(root);
+        }
         assert!(home.join(".claude/skills/enso/SKILL.md").is_file());
         assert_eq!(
             fs::read_to_string(home.join(".gitignore")).unwrap(),
@@ -812,7 +767,7 @@ mod tests {
             fs::read_to_string(home.join("AGENTS.md")).unwrap(),
             include_str!("../bundled/AGENTS.md")
         );
-        for old in ["skills", "workspace", "workspaces"] {
+        for old in ["skills", "workspace", "workspaces/main/uploads"] {
             assert!(!home.join(old).exists(), "{old}");
         }
         for file in [
@@ -836,123 +791,10 @@ mod tests {
                 "{file}"
             );
         }
-    }
-
-    #[test]
-    fn scaffold_creates_only_missing_workspace_directories() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
+        // The existing config may not name `main`, so init never recreates it.
+        fs::remove_dir_all(home.join("workspaces")).unwrap();
         init(&home).unwrap();
-        let outside = temp.path().join("projects/acme");
-        let existing = temp.path().join("existing");
-        fs::create_dir(&existing).unwrap();
-        fs::write(existing.join("notes.txt"), "keep").unwrap();
-        fs::write(
-            home.join("config.json"),
-            json!({
-                "defaults": {"provider": "main"},
-                "providers": {"main": {"cli": ""}},
-                "workspaces": {
-                    "main": {"path": "${ENSO_HOME}/workspaces/main"},
-                    "acme": {"path": outside},
-                    "acme-opus": {"path": outside},
-                    "existing": {"path": existing}
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let config = load_with(&home, BTreeMap::new()).unwrap().config;
-        let main = home.join("workspaces/main");
-        assert_eq!(
-            scaffold(&config),
-            (vec![main.clone(), outside.clone()], vec![])
-        );
-        for (name, path) in [("main", &main), ("acme", &outside)] {
-            for dir in ["", ".agents", ".agents/skills", ".claude"] {
-                assert_eq!(mode(&path.join(dir)), 0o700, "{name} {dir}");
-            }
-            assert_eq!(mode(&path.join("AGENTS.md")), 0o600);
-            assert_guidance_links(path);
-            let agents = fs::read_to_string(path.join("AGENTS.md")).unwrap();
-            assert!(
-                agents.starts_with(&format!("# {name} workspace\n")),
-                "{agents}"
-            );
-            assert!(agents.contains("Describe this workspace's focus"));
-            assert!(!path.join("uploads").exists());
-        }
-        assert_eq!(mode(&temp.path().join("projects")), 0o700);
-        assert_eq!(
-            fs::read_dir(&existing).unwrap().count(),
-            1,
-            "an existing workspace gains no files"
-        );
-        fs::write(main.join("AGENTS.md"), "custom").unwrap();
-        fs::remove_file(main.join("CLAUDE.md")).unwrap();
-        assert_eq!(scaffold(&config), (vec![], vec![]));
-        assert_eq!(
-            fs::read_to_string(main.join("AGENTS.md")).unwrap(),
-            "custom"
-        );
-        assert!(fs::symlink_metadata(main.join("CLAUDE.md")).is_err());
-    }
-
-    #[test]
-    fn scaffold_creates_a_parent_workspace_before_a_nested_one() {
-        let temp = tempfile::tempdir().unwrap();
-        let team = temp.path().join("team");
-        let config: Config = serde_json::from_value(json!({
-            "defaults": {"provider": "main"},
-            "workspaces": {"a": {"path": team.join("inner")}, "b": {"path": team}}
-        }))
-        .unwrap();
-        assert_eq!(
-            scaffold(&config),
-            (vec![team.clone(), team.join("inner")], vec![])
-        );
-        for (name, path) in [("b", team.clone()), ("a", team.join("inner"))] {
-            assert_guidance_links(&path);
-            assert!(
-                fs::read_to_string(path.join("AGENTS.md"))
-                    .unwrap()
-                    .starts_with(&format!("# {name} workspace\n"))
-            );
-        }
-    }
-
-    #[test]
-    fn scaffold_reports_an_unusable_workspace_and_creates_the_others() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("file");
-        fs::write(&file, "not a directory").unwrap();
-        let locked = temp.path().join("locked");
-        fs::create_dir(&locked).unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
-        let good = temp.path().join("good");
-        let config: Config = serde_json::from_value(json!({
-            "defaults": {"provider": "main"},
-            "workspaces": {
-                "file": {"path": file},
-                "good": {"path": good},
-                "locked": {"path": locked.join("acme")}
-            }
-        }))
-        .unwrap();
-        let (created, errors) = scaffold(&config);
-        assert_eq!(created, [good.as_path()]);
-        assert_eq!(errors.len(), 2, "{errors:?}");
-        assert_eq!(
-            errors[0],
-            "workspaces.file.path exists but is not a directory"
-        );
-        assert!(
-            errors[1].starts_with("workspaces.locked: create "),
-            "{errors:?}"
-        );
-        assert_eq!(fs::read_to_string(file).unwrap(), "not a directory");
-        assert_guidance_links(&good);
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!home.join("workspaces").exists());
     }
 
     #[test]
@@ -1112,7 +954,6 @@ mod tests {
             "providers.other.model must not start with -",
             "defaults.provider is blank",
             "defaults.timeout_seconds must be greater than zero",
-            "workspace name \"bad name\" may contain only",
             "workspaces.bad name.path must be absolute",
             "workspaces.bad name.provider is not defined",
             "slack.dms key \"D1\"",
@@ -1128,7 +969,7 @@ mod tests {
                 "{message}: {problems:#?}"
             );
         }
-        assert_eq!(problems.len(), 14, "{problems:#?}");
+        assert_eq!(problems.len(), 13, "{problems:#?}");
         let error = loaded.validate().unwrap_err().to_string();
         assert!(
             error.starts_with("providers.main.cli is blank")
@@ -1284,11 +1125,6 @@ mod tests {
                 "workspaces.main.path must be absolute; use ${ENSO_HOME}/... for paths inside the Enso home",
             ),
             (r#"{"main":{"path":""}}"#, "{}", "must be absolute"),
-            (
-                r#"{"my space":{"path":"/srv"}}"#,
-                "{}",
-                "may contain only letters",
-            ),
             (
                 r#"{"main":{"path":"/srv","provider":"opus"}}"#,
                 "{}",

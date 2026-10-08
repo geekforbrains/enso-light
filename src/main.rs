@@ -144,31 +144,10 @@ async fn execute(cli: Cli) -> Result<()> {
     ensure!(home.is_absolute(), "--home must be an absolute path");
     match cli.command {
         Command::Init => {
-            // Never seed a mini configuration over an old Enso installation.
-            if home.join("enso.db").exists() {
-                Db::open(&home)?;
-            }
-            if home.join("config.json").exists() {
-                config::load(&home)?;
-            } else {
-                config::read_dotenv(&home)?;
-            }
             config::init(&home)?;
-            Db::open(&home)?;
             let warnings: Vec<String> = config::git_init(&home).into_iter().collect();
-            // Scaffolding needs parsed workspace paths, not a valid provider yet.
-            let (workspaces, errors) = config::scaffold(&config::load(&home)?.config);
-            ensure!(errors.is_empty(), "{}", errors.join("; "));
-            let check = config::check(&home);
-            let next = if check.valid {
-                "Install and start the service with enso service install and enso service start, or run enso service restart if it is installed."
-            } else if check.errors.iter().all(|e| config::is_starter_blank(e)) {
-                "Set providers.main.cli and the Slack tokens in .env, then run enso config check."
-            } else {
-                "Run enso config check and fix the errors it reports."
-            };
             print(
-                &json!({"initialized":home,"workspaces_created":workspaces,"warnings":warnings,"next":next}),
+                &json!({"initialized":home,"warnings":warnings,"next":"Fill in config.json and .env, then run enso config check."}),
                 cli.json,
             );
         }

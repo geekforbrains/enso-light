@@ -77,7 +77,6 @@ impl Fixture {
         .unwrap();
         let loaded = config::load(home.path()).unwrap();
         loaded.validate().unwrap();
-        assert!(config::scaffold(&loaded.config).1.is_empty());
         let db = Db::open(home.path()).unwrap();
         let slack = Slack::new(&loaded.tokens).unwrap();
         Self {
@@ -1422,7 +1421,7 @@ fn unmentioned_thread_replies_use_participation_in_the_thread_root() {
 }
 
 #[test]
-fn startup_checks_the_database_first_and_logs_unusable_workspaces_and_jobs() {
+fn startup_checks_the_database_first_and_tolerates_unusable_workspaces_and_jobs() {
     let home = tempfile::tempdir().unwrap();
     config::init(home.path()).unwrap();
     fs::write(
@@ -1430,9 +1429,7 @@ fn startup_checks_the_database_first_and_logs_unusable_workspaces_and_jobs() {
         "SLACK_BOT_TOKEN=test-bot-token\nSLACK_APP_TOKEN=test-app-token\n",
     )
     .unwrap();
-    let locked = home.path().join("locked");
-    fs::create_dir(&locked).unwrap();
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+    let missing = home.path().join("missing");
     fs::write(
         home.path().join("config.json"),
         json!({
@@ -1440,7 +1437,7 @@ fn startup_checks_the_database_first_and_logs_unusable_workspaces_and_jobs() {
             "providers": {"main": {"cli": "claude"}},
             "workspaces": {
                 "main": {"path": "${ENSO_HOME}/workspaces/main"},
-                "ext": {"path": locked.join("acme")}
+                "ext": {"path": missing}
             }
         })
         .to_string(),
@@ -1450,7 +1447,7 @@ fn startup_checks_the_database_first_and_logs_unusable_workspaces_and_jobs() {
     fs::create_dir(&broken).unwrap();
     fs::write(broken.join("job.json"), r#"{"workspace":"other"}"#).unwrap();
     fs::write(broken.join("prompt.md"), "Never runs.").unwrap();
-    // A database from another schema stops startup before anything is created.
+    // A database from another schema stops startup.
     rusqlite::Connection::open(home.path().join("enso.db"))
         .unwrap()
         .execute_batch("CREATE TABLE old(id); PRAGMA user_version=1;")
@@ -1460,23 +1457,11 @@ fn startup_checks_the_database_first_and_logs_unusable_workspaces_and_jobs() {
         .unwrap()
         .to_string();
     assert!(error.contains("enso.db uses schema 1"), "{error}");
-    assert!(!home.path().join("workspaces").exists());
     fs::remove_file(home.path().join("enso.db")).unwrap();
+    // A missing workspace fails only its own runs, and startup never creates it.
     let (_, lock, _, log) = prepare(home.path(), &mut HashMap::new()).unwrap();
     drop(lock);
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(home.path().join("workspaces/main/AGENTS.md").is_file());
-    assert_eq!(log.len(), 3, "{log:?}");
+    assert!(!missing.exists());
+    assert_eq!(log.len(), 1, "{log:?}");
     assert!(log[0].starts_with("Job schedule: job broken: "), "{log:?}");
-    assert_eq!(
-        log[1],
-        format!(
-            "Created workspace {}",
-            home.path().join("workspaces/main").display()
-        )
-    );
-    assert!(
-        log[2].starts_with("Workspace: workspaces.ext: create "),
-        "{log:?}"
-    );
 }

@@ -25,8 +25,10 @@ The default home is `~/.enso`; `--home PATH` selects another home.
 ```
 
 `enso init` creates missing directories and starter files without overwriting
-existing content, runs `git init` in the home when it has no `.git`, and then
-[creates missing workspaces](#workspace-scaffolding). Credentials and generated
+existing content and runs `git init` in the home when it has no `.git`. It
+creates the starter `workspaces/main` only together with a new starter
+`config.json`; Enso never creates other workspace folders (see
+[adding a workspace](#adding-a-workspace)). Credentials and generated
 files use private permissions. Each agent process runs in its
 [workspace](#workspaces)'s directory; job hooks run in their job's directory.
 The starter `.gitignore` keeps `.env`, `enso.db*`, `daemon.lock`, `logs/`, and
@@ -117,7 +119,6 @@ the provider's `args`.
 ### workspaces
 
 Each workspace is a named directory where agents run; define at least one.
-Names use letters, numbers, hyphens, and underscores.
 
 | Field | Purpose |
 |---|---|
@@ -129,24 +130,24 @@ different providers. Each run sets `ENSO_WORKSPACE` to the absolute path, and
 incoming attachments go to `uploads/<run-id>/` inside it, readable only by the
 Enso user.
 
-#### Workspace scaffolding
+#### Adding a workspace
 
-`enso init` and service startup create each configured workspace whose
-directory does not exist, inside or outside the Enso home, with private
-permissions and a starter layout:
+Enso never creates workspace folders. `config check` reports a configured path
+that is not a directory, and runs routed to it fail until it exists. To add a
+workspace, create its directory, add it to `workspaces` and a route, and run
+`enso service restart`. Inside the Enso home, give it the same layout as `main`
+so Claude Code and Codex share its instructions and skills:
 
-- `AGENTS.md`, a short note to describe the workspace's focus
-- `CLAUDE.md -> AGENTS.md`
-- `.agents/skills/` for skills only this workspace uses
-- `.claude/skills -> ../.agents/skills`
+```sh
+mkdir -p ~/.enso/workspaces/acme/.agents/skills ~/.enso/workspaces/acme/.claude
+cd ~/.enso/workspaces/acme
+echo "# acme workspace" > AGENTS.md   # then describe its focus
+ln -s AGENTS.md CLAUDE.md
+ln -s ../.agents/skills .claude/skills
+```
 
-An existing directory, such as a project repository, is used as it is: Enso adds
-no files or links, only `uploads/<run-id>/` when a message has attachments. A
-path that exists but is not a directory is an error. If service startup cannot
-create a workspace, for example on an unmounted volume, it logs the error and
-keeps running; that workspace's runs fail until its directory exists. A
-directory removed while the service runs makes its runs fail until it is
-recreated or the service restarts.
+An existing directory, such as a project repository, works as it is: Enso adds
+only `uploads/<run-id>/` when a message has attachments.
 
 ### Instructions and skills
 

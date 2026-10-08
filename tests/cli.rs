@@ -129,18 +129,13 @@ fn upgrade_rejects_a_service_registered_to_another_executable() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("SLACK_APP_TOKEN is blank in .env"));
-    fs::write(directory.path().join(".env"), dotenv).unwrap();
-    add_job(directory.path(), "broken", json!({"workspace":"other"}));
-    let output = run(&["service", "install"]);
-    assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
-        error.contains("enso config check found problems")
-            && error.contains("job broken: invalid workspace"),
+        error.contains("SLACK_APP_TOKEN is blank; set it in .env")
+            && error.contains("the installed service reads only .env"),
         "{error}"
     );
-    fs::remove_dir_all(directory.path().join("jobs/broken")).unwrap();
+    fs::write(directory.path().join(".env"), dotenv).unwrap();
     // A variable only the installing shell has would leave the service unable to start.
     let config = fs::read_to_string(directory.path().join("config.json")).unwrap();
     let mut shell_only: Value = serde_json::from_str(&config).unwrap();
@@ -159,11 +154,13 @@ fn upgrade_rejects_a_service_registered_to_another_executable() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
-        error.contains("missing environment variable WORK; set it in .env"),
+        error.contains("missing environment variable WORK; the installed service reads only .env"),
         "{error}"
     );
     assert!(!account.path().join("Library").exists() && !account.path().join("config").exists());
     fs::write(directory.path().join("config.json"), config).unwrap();
+    // The service skips invalid jobs, so one does not block installing it.
+    add_job(directory.path(), "broken", json!({"workspace":"other"}));
     let installed = successful(run(&["service", "install"]));
     let file = Path::new(installed["file"].as_str().unwrap());
     fs::write(file, "a service registered to another executable").unwrap();
@@ -184,37 +181,23 @@ fn add_job(home: &Path, name: &str, definition: Value) {
 }
 
 #[test]
-fn init_points_to_config_check_when_problems_go_beyond_the_starter_blanks() {
-    let fix = "Run enso config check and fix the errors it reports.";
-    let directory = configured_home();
-    let home = directory.path();
-    add_job(home, "broken", json!({"workspace":"other"}));
-    assert_eq!(successful(enso(home, &["init"]))["next"], fix);
-    fs::remove_dir_all(home.join("jobs/broken")).unwrap();
-    // A blank provider other than the starter's `main` is not a starter blank.
-    let path = home.join("config.json");
-    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    config["providers"]["opus"]["cli"] = json!("");
-    fs::write(&path, config.to_string()).unwrap();
-    assert_eq!(successful(enso(home, &["init"]))["next"], fix);
-}
-
-#[test]
-fn init_creates_a_git_home_with_shared_guidance_and_a_scaffolded_workspace() {
+fn init_creates_a_git_home_with_shared_guidance_and_a_starter_workspace() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path();
     let output = successful(enso(home, &["init"]));
-    assert_eq!(output["warnings"], json!([]));
     assert_eq!(
-        output["workspaces_created"],
-        json!([home.join("workspaces/main")])
+        output,
+        json!({
+            "initialized": home,
+            "warnings": [],
+            "next": "Fill in config.json and .env, then run enso config check."
+        })
     );
-    assert_eq!(
-        output["next"],
-        "Set providers.main.cli and the Slack tokens in .env, then run enso config check."
+    assert!(
+        !home.join("enso.db").exists(),
+        "the service creates the database"
     );
     for name in [
-        "enso.db",
         "config.json",
         ".env",
         ".gitignore",
@@ -255,8 +238,7 @@ fn init_creates_a_git_home_with_shared_guidance_and_a_scaffolded_workspace() {
         fs::write(home.join(name), content).unwrap();
     }
     let original_env = fs::read(home.join(".env")).unwrap();
-    let again = successful(enso(home, &["init"]));
-    assert_eq!(again["workspaces_created"], json!([]));
+    successful(enso(home, &["init"]));
     for (name, content) in custom {
         assert_eq!(
             fs::read_to_string(home.join(name)).unwrap(),
@@ -317,43 +299,6 @@ fn init_creates_the_home_repository_despite_git_location_variables() {
     assert_eq!(successful(output)["warnings"], json!([]));
     assert!(home.join(".git").is_dir());
     assert!(!other.exists());
-}
-
-#[test]
-fn init_creates_the_repository_before_a_failing_workspace() {
-    let directory = tempfile::tempdir().unwrap();
-    let home = directory.path();
-    let file = home.join("not-a-directory");
-    fs::write(&file, "").unwrap();
-    fs::write(
-        home.join("config.json"),
-        json!({"defaults":{"provider":"main"},"workspaces":{"main":{"path":file}}}).to_string(),
-    )
-    .unwrap();
-    let result = enso(home, &["init"]);
-    assert!(!result.status.success());
-    assert!(
-        String::from_utf8_lossy(&result.stderr).contains("exists but is not a directory"),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(home.join(".git").is_dir());
-}
-
-#[test]
-fn init_with_an_invalid_env_writes_nothing() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join(".env"), "this is not valid").unwrap();
-    let result = enso(directory.path(), &["init"]);
-    assert!(!result.status.success());
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("invalid Enso .env"), "{stderr}");
-    assert!(!stderr.contains("this is not valid"), "{stderr}");
-    let names: Vec<_> = fs::read_dir(directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(names, [".env"]);
 }
 
 #[test]
@@ -427,27 +372,27 @@ fn config_check_reports_every_error_and_note_at_once() {
         r#"defaults.mention must be "always", "first", or "never""#,
         "workspaces.relative.path must be absolute",
         "workspaces.relative.provider is not defined in providers",
-        "workspaces.file.path exists but is not a directory",
+        "workspaces.file.path is not a directory; create it or fix the path",
+        "workspaces.main.path is not a directory",
+        "workspaces.bad ws.path is not a directory",
         "SLACK_BOT_TOKEN is blank",
         "job bad-provider: invalid provider",
         "job bad-workspace: invalid workspace",
         r#"job "bad name": job names may contain only"#,
-        r#"workspace name "bad ws" may contain only"#,
     ] {
         assert!(has(errors, message), "{message}: {errors:#}");
     }
-    assert_eq!(errors.as_array().unwrap().len(), 12, "{errors:#}");
-    assert!(stderr.contains("config check found 12 errors"), "{stderr}");
+    assert_eq!(errors.as_array().unwrap().len(), 13, "{errors:#}");
+    assert!(stderr.contains("config check found 13 errors"), "{stderr}");
     assert!(!report.to_string().contains("sometimes"));
     let notes = &report["notes"];
     for message in [
         r#"no dms or channels are configured; Enso will reply "not configured" to every message"#,
-        "workspaces.main.path does not exist yet; it will be created on init or service start",
         "Codex will not load the shared AGENTS.md",
     ] {
         assert!(has(notes, message), "{message}: {notes:#}");
     }
-    assert_eq!(notes.as_array().unwrap().len(), 3, "{notes:#}");
+    assert_eq!(notes.as_array().unwrap().len(), 2, "{notes:#}");
     assert!(!report.to_string().contains(&home.display().to_string()));
 }
 
@@ -466,10 +411,7 @@ fn config_check_passes_with_notes() {
         json!({
             "defaults": {"provider": "main"},
             "providers": {"main": {"cli": "claude"}},
-            "workspaces": {
-                "main": {"path": "${ENSO_HOME}/workspaces/main"},
-                "later": {"path": "${ENSO_HOME}/workspaces/later"}
-            }
+            "workspaces": {"main": {"path": "${ENSO_HOME}/workspaces/main"}}
         })
         .to_string(),
     )
@@ -480,8 +422,7 @@ fn config_check_passes_with_notes() {
     assert_eq!(
         report["notes"],
         json!([
-            r#"no dms or channels are configured; Enso will reply "not configured" to every message"#,
-            "workspaces.later.path does not exist yet; it will be created on init or service start"
+            r#"no dms or channels are configured; Enso will reply "not configured" to every message"#
         ])
     );
     fs::write(
@@ -561,19 +502,13 @@ fn config_check_rejects_an_old_database_without_changing_it() {
         ),
         "{report:#}"
     );
+    // init never opens the database either.
+    successful(enso(home, &["init"]));
     let version: i64 = rusqlite::Connection::open(home.join("enso.db"))
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(version, 1);
-    let rerun = enso(home, &["init"]);
-    assert!(!rerun.status.success());
-    fs::remove_file(home.join("enso.db")).unwrap();
-    let rerun = successful(enso(home, &["init"]));
-    assert_eq!(
-        rerun["next"],
-        "Install and start the service with enso service install and enso service start, or run enso service restart if it is installed."
-    );
 }
 
 #[test]
@@ -793,17 +728,17 @@ fn a_run_can_wait_for_another_jobs_result() {
 }
 
 #[test]
-fn invalid_existing_configuration_is_not_reseeded_by_init() {
+fn init_keeps_an_existing_config_and_adds_no_workspace_for_it() {
     let directory = tempfile::tempdir().unwrap();
     let config_path = directory.path().join("config.json");
     fs::write(&config_path, "old incompatible config").unwrap();
-    let result = enso(directory.path(), &["init"]);
-    assert!(!result.status.success());
+    successful(enso(directory.path(), &["init"]));
     assert_eq!(
         fs::read_to_string(&config_path).unwrap(),
         "old incompatible config"
     );
-    for name in ["workspaces", "AGENTS.md", ".git", "enso.db"] {
+    assert!(directory.path().join("AGENTS.md").is_file());
+    for name in ["workspaces", "enso.db"] {
         assert!(!directory.path().join(name).exists(), "{name}");
     }
 }

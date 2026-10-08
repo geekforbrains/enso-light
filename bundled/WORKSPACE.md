@@ -1,4 +1,4 @@
-# {{name}} workspace
+# main workspace
 
 Describe this workspace's focus: the projects, people, and conventions its
 conversations and jobs should know about.

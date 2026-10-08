@@ -60,9 +60,8 @@ struct Event {
     payload: Value,
     accepted: oneshot::Sender<()>,
 }
-/// Service startup before Slack connects. The database is checked before any
-/// workspace is created, so a start that will fail changes nothing. A workspace
-/// or job that cannot be used is returned as a log line, never fatal.
+/// Service startup before Slack connects. A job that cannot be used is returned
+/// as a log line, never fatal; a missing workspace fails only the runs that use it.
 fn prepare(
     home: &Path,
     job_errors: &mut HashMap<String, String>,
@@ -75,17 +74,6 @@ fn prepare(
     for error in scheduled_jobs(home, &loaded.config, job_errors).1 {
         log.push(format!("Job schedule: {}", redact(&error, &loaded)));
     }
-    let (created, errors) = config::scaffold(&loaded.config);
-    log.extend(
-        created
-            .iter()
-            .map(|path| format!("Created workspace {}", path.display())),
-    );
-    log.extend(
-        errors
-            .iter()
-            .map(|error| format!("Workspace: {}", redact(error, &loaded))),
-    );
     Ok((loaded, lock, db, log))
 }
 

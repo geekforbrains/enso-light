@@ -14,22 +14,18 @@ enso service logs [--follow]
 ```
 
 `init` creates the [home layout](configuration.md) and starter files, never
-replacing existing ones. It runs `git init` in a home without `.git`, since
-Codex needs the repository to load the shared `AGENTS.md` and `.agents/skills`;
-without git it warns in its output instead of failing. It then creates each
-configured workspace whose directory is missing, as
-[scaffolded workspaces](configuration.md#workspace-scaffolding). An existing
-`config.json`, `.env`, or `enso.db` that fails to load stops `init` before
-anything is created. Its JSON output lists `workspaces_created`, any
-`warnings`, and a `next` step: fill in the starter blanks, fix the errors
-`enso config check` reports, or install and start the service once the
-configuration is valid.
+replacing existing ones, and the starter `workspaces/main` only together with a
+new starter `config.json`. It never reads an existing configuration or
+database. It runs `git init` in a home without `.git`, since Codex needs the
+repository to load the shared `AGENTS.md` and `.agents/skills`; without git it
+warns in its output instead of failing. Its JSON output has `initialized`, any
+`warnings`, and a `next` step.
 
 `run` starts the foreground service. A lock allows only one service per Enso
-home. Startup checks `enso.db` before creating anything, then creates missing
-workspaces like `init`; a workspace it cannot create is logged and skipped, and
-runs routed to it fail until it exists. Job triggers and message sends need a
-running service; they submit work to SQLite.
+home. Startup stops on an `enso.db` from an older release; an invalid job is
+logged and skipped, and runs routed to a missing workspace directory fail until
+it exists. Job triggers and message sends need a running service; they submit
+work to SQLite.
 
 Install git and an authenticated Claude Code or Codex CLI first, then install Enso:
 
@@ -70,8 +66,8 @@ It enables startup at login; `start` runs it now. Linux operation after logout
 requires your OS user's normal lingering/session configuration. Installation
 captures `HOME`, `PATH`, and native CLI configuration paths so the service can
 find the same authenticated CLI. Secrets stay in `.env` and are read at runtime;
-installation requires `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` there and a
-`config check` without errors.
+installation requires `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` there; see
+[checking configuration](#checking-configuration).
 Reinstall if the Enso executable or the relevant `PATH` changes. Uninstall stops
 the service and removes registration; it preserves the entire Enso home.
 
@@ -99,22 +95,23 @@ problem at once instead of stopping at the first:
 
 `errors` covers blank or unknown provider CLIs and names, unknown workspace and
 provider references in workspaces, routes, and jobs, relative workspace paths, a
-workspace path that is not a directory, invalid route keys and names, unknown
+workspace path that is not a directory, invalid route keys and job names, unknown
 `mention` modes, zero timeouts, blank `SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN`,
 each invalid job, and an `enso.db` from an older release, which it reads
 without changing.
-`notes` are not errors: no configured `dms` or `channels`, a workspace directory
-that `init` or service start will create, or a Codex provider while the home is
-not a git repository. With an empty `slack.unconfigured_message`, the no-routes
+`notes` are not errors: no configured `dms` or `channels`, or a Codex provider
+while the home is not a git repository. With an empty `slack.unconfigured_message`, the no-routes
 note says Enso will ignore every message instead. `jobs` counts job directories,
 valid or not. A `config.json` that cannot be loaded at all is reported as one
 error; `providers` and `workspaces` are then 0, and jobs are not validated.
 The report never includes token values or other substituted values. The
 command exits non-zero when there are errors, ending with an error such as
-`config check found 3 errors`. `service install` refuses to install while
-`config check` has errors. It also loads the configuration with only the
-environment the service will have (`.env` plus `HOME`, `PATH`, and a few CLI
-variables), so a `${NAME}` that only your shell defines must be set in `.env`.
+`config check found 3 errors`. `service install` checks what service startup
+needs: it loads the configuration with only the environment the service will
+have (`.env` plus `HOME`, `PATH`, and a few CLI variables) and refuses on any
+configuration or token error, so a `${NAME}` that only your shell defines must
+be set in `.env`. Invalid jobs and missing workspace directories do not block
+it; they fail only their own runs.
 
 `jobs list` shows each valid job's `enabled`, `cron`, `next_run`, and
 `last_run`, and each [invalid job](jobs.md#invalid-jobs) as

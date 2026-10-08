@@ -11,7 +11,7 @@ use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{self, Config, Destination};
+use crate::config::{Config, Destination};
 
 /// Upper bound on `retries`, since each retry is a full agent turn.
 pub const MAX_RETRIES: u32 = 10;
@@ -93,9 +93,17 @@ pub fn list(home: &Path, config: &Config) -> Result<Vec<(String, Result<Job>)>> 
     Ok(jobs)
 }
 
+/// Letters, digits, hyphens, and underscores, since a job name is a directory name.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
 pub fn load(home: &Path, name: &str, config: &Config) -> Result<Job> {
     ensure!(
-        config::valid_name(name),
+        valid_name(name),
         "job {name:?}: job names may contain only letters, numbers, hyphens, and underscores"
     );
     let directory = home.join("jobs").join(name);
@@ -103,15 +111,8 @@ pub fn load(home: &Path, name: &str, config: &Config) -> Result<Job> {
         &fs::read_to_string(directory.join("job.json"))
             .with_context(|| format!("job {name}: could not read job.json"))?,
     )
-    .map_err(|error| match config::safe_detail(&error) {
-        Some(detail) => anyhow::anyhow!("job {name}: invalid job.json: {detail}"),
-        None if error.is_syntax() || error.is_eof() => {
-            anyhow::anyhow!("job {name}: job.json is not valid JSON: {error}")
-        }
-        None => {
-            anyhow::anyhow!("job {name}: invalid job.json fields or value types; see docs/jobs.md")
-        }
-    })?;
+    // job.json has no ${NAME} substitution, so serde's message cannot echo a secret.
+    .map_err(|error| anyhow::anyhow!("job {name}: invalid job.json: {error}"))?;
     if let Some(expression) = &definition.cron {
         schedules(expression).with_context(|| format!("job {name}: invalid cron"))?;
     }
@@ -434,7 +435,7 @@ mod tests {
             "job \"bad name\": job names may contain only letters, numbers, hyphens, and underscores"
         );
         assert!(
-            error(2).starts_with("job broken: job.json is not valid JSON: EOF"),
+            error(2).starts_with("job broken: invalid job.json: EOF while parsing"),
             "{}",
             error(2)
         );
@@ -443,9 +444,10 @@ mod tests {
             "{}",
             error(4)
         );
-        assert_eq!(
-            error(5),
-            "job typed: invalid job.json fields or value types; see docs/jobs.md"
+        assert!(
+            error(5).starts_with("job typed: invalid job.json: invalid type: string"),
+            "{}",
+            error(5)
         );
     }
 

@@ -15,6 +15,9 @@ Versioning and publication follow the [release flow](docs/releases.md).
 2. Hooks that read `.workspace.path`, `.run_id`, `.provider`, or
    `.notification_target` from stdin switch to `$ENSO_WORKSPACE`,
    `$ENSO_RUN_ID`, and `$ENSO_CHANNEL` / `$ENSO_THREAD_TS`.
+3. Create any configured workspace directory that does not exist yet, as in
+   [adding a workspace](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#adding-a-workspace);
+   `enso config check` lists them.
 
 ### Changed
 
@@ -46,6 +49,19 @@ Versioning and publication follow the [release flow](docs/releases.md).
   inside the Enso home are in its git repository; for a Codex workspace
   elsewhere, trust the folder in Codex or add `--skip-git-repo-check` to the
   provider's `args`.
+- **Breaking:** Enso no longer creates workspace folders. `enso init` still
+  creates the starter `workspaces/main` with a new starter `config.json`;
+  service startup creates nothing, and `config check` reports a workspace path
+  that is not a directory as an error.
+- `enso init` prints one fixed next step and no longer reads an existing
+  `config.json`, `.env`, or `enso.db` or creates the database; the service
+  creates it on start.
+- `enso service install` checks only what service startup needs: the
+  configuration and Slack tokens as the service will load them. An invalid job
+  no longer blocks installing.
+- Workspace names may use any characters; job names still use letters,
+  numbers, hyphens, and underscores.
+- An invalid `job.json` reports the JSON parser's own message.
 
 ## [0.2.0] - 2026-10-08
 
