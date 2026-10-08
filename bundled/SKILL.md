@@ -5,19 +5,11 @@ description: Use Enso's Slack lookup, messaging, attachments, scheduled jobs, an
 
 # Enso
 
-Enso runs your installed agent CLI in a workspace: the directory configured for
-this conversation or job, also in `$ENSO_WORKSPACE`. Other conversations and
-jobs may share it or use other workspaces, so preserve unrelated work. Each turn's
-injected context identifies Slack versus a job, the workspace, the sender and
-destination, and local attachments.
-DMs share one session, including DM threads. Channel threads have separate sessions.
-Messages in a busy conversation queue in order. Different conversations and jobs
-run in parallel with no global concurrency limit or setting.
-
-For Slack turns, your final response is sent automatically to the current reply
-destination. Use ordinary Markdown. Do not send that same answer again with the CLI.
-Incoming attachments are local files under the workspace's
-`uploads/<run-id>/`; inspect the supplied paths.
+The `enso` CLI reaches Slack and jobs from inside a run. Enso sets
+`$ENSO_WORKSPACE` (your working directory), `$ENSO_SOURCE` (`slack` or `job`),
+`$ENSO_RUN_ID`, `$ENSO_JOB`, and `$ENSO_CHANNEL` and `$ENSO_THREAD_TS`: this
+Slack conversation, or the job's `notify` destination. Incoming attachments are
+under `$ENSO_WORKSPACE/uploads/$ENSO_RUN_ID/`.
 
 ## Read Slack context
 
@@ -45,7 +37,7 @@ Search without `--channel`
 uses Slack query syntax and needs an optional user token with `search:read`;
 do not assume the bot's existing credentials support workspace search.
 
-## Send additional messages or files
+## Send messages or files
 
 ```sh
 enso message send "An update"
@@ -54,82 +46,58 @@ enso message send "Report ready" --to C012345 --thread 1234567890.123456
 enso message send "Weekly metrics: signups up 12%" --blocks metrics.json
 ```
 
-Use `--file PATH` repeatedly to attach files; `--text-file PATH` or stdin supplies
-message text. Text is standard Markdown; Slack renders it, including tables.
+Without `--to`, messages go to `$ENSO_CHANNEL` and `$ENSO_THREAD_TS`; a job
+without `notify` must name `--to`. Find other IDs with `enso slack channels`.
+"Here" means `$ENSO_CHANNEL`, and its thread only when the user means this
+thread. Use `--file PATH` repeatedly to attach files; `--text-file PATH` or
+stdin supplies the text. Text is standard Markdown; Slack renders it, including
+tables. The service must be running.
 
-When Markdown cannot express what you need, write Block Kit JSON
-(https://docs.slack.dev/reference/block-kit/blocks) and send it with
-`--blocks PATH`; the text becomes its notification fallback. Slack draws native
-charts with a `data_visualization` block (line, bar, area, or pie; at most two
-per message) and sortable, paginated tables with a `data_table` block (up to
-200 rows; use `raw_number` cells for numeric sorting). Read the block's
-reference page before writing one. A bar chart:
-
-```json
-[{"type": "data_visualization", "title": "Signups by month",
-  "chart": {"type": "bar",
-    "series": [{"name": "Signups", "data": [
-      {"label": "Sep", "value": 1350}, {"label": "Oct", "value": 1520}]}],
-    "axis_config": {"categories": ["Sep", "Oct"], "y_label": "Accounts"}}}]
-```
-
-Every series needs one point per category; titles are at most 50 characters
-and labels at most 20. A pie chart uses
-`"segments": [{"label": "Twix", "value": 28}]` instead of `series` and
-`axis_config`. Blocks are sent as given, so mention syntax in them notifies
-people, and interactive callbacks such as button clicks are not handled.
-
-Without `--to`, Enso uses this run's Slack conversation or the job's `notify`
-destination. Use an explicit destination for another conversation. The service
-must be running.
-Only send additional/background messages when the user's request calls for them.
+When Markdown cannot express what you need, such as native charts
+(`data_visualization`) or sortable tables (`data_table`), write Block Kit JSON
+after reading the block's page at https://docs.slack.dev/reference/block-kit/blocks
+and send it with `--blocks PATH`; the text becomes its notification fallback.
+Blocks are sent as given, so mentions in them notify people, and interactive
+callbacks such as button clicks are not handled.
 
 ## Jobs
 
 ```sh
 enso jobs list
 enso jobs run JOB
+enso jobs run JOB --wait
 ```
 
-Add `--wait` when the current task needs the job's result before continuing.
-It is supported inside agent runs and hooks. Without it, the command returns as
-soon as the job is queued; the service owns that job and it can continue after
-the calling turn ends. A job already queued or running skips scheduled
-occurrences without catch-up and rejects additional manual triggers.
-`enso jobs list` shows an invalid job with its `error`; the service skips it
-until it is fixed. Run `enso config check` after creating or editing a job.
+`--wait` returns the job's result; use it when the current task needs it.
+Without it, the job is queued and keeps running after your turn. A job already
+queued or running rejects another trigger. `enso jobs list` shows an invalid job
+with its `error`; run `enso config check` after creating or editing a job.
 
-Jobs live at `$ENSO_HOME/jobs/JOB/`. A required `prompt.md` is the user request;
-`job.json` sets a required `workspace` (a name from `workspaces` in
-`config.json`), `cron`, `enabled`, an optional `provider` (a name from
-`providers`; defaults to the workspace's provider, then `defaults.provider`),
-optional `timeout_seconds` per process, and
-optional `notify`: where the job posts, `{"channel":"C…"}` for a channel or
-`D…` for a DM, plus `"thread":"TS"` for a thread. Omit it for a job that never
-posts. "Here" means this run's reply channel, and its thread only when the
-user means this thread; find other IDs with `enso slack channels`.
-Runs use the job's workspace and fresh native sessions. Optional `prerun.sh` and
-`postrun.sh` run with Bash from the job directory. Prerun stdout provides JSON;
-return `{"vars":{"NAME":"value"}}` to expand `{{NAME}}` in the prompt or
-`{"skip":true,"reason":"Nothing new"}` to skip. Diagnostics go to stderr.
-Postrun runs after each agent attempt; stdin contains run context plus
-`variables`, `result`, `status`, `error`, `attempt`, and `max_attempts`. Its
-stdout is empty to accept, or `{"retry":true,"message":"What to fix"}` to resume
-the agent's session with that message right away. `retries` in `job.json`
-(default 0, at most 10) limits extra attempts; then the run fails. In either
-hook, redirect commands that print, such as `enso message send`, with `>&2`.
-Job output is saved, not sent to Slack automatically. Use `enso message send`
-when the job asks for a notification; a job that may retry should notify from
-postrun after accepting, since sent messages are not withdrawn.
+A job is a directory `$ENSO_HOME/jobs/NAME/` (letters, numbers, `-`, `_`):
+
+- `prompt.md` (required): the request
+- `job.json`: `workspace` (required; a name from `workspaces` in `config.json`),
+  `cron` (five fields, local time; omit for manual-only), `enabled` (default
+  true), `provider` (defaults to the workspace's, then `defaults.provider`),
+  `timeout_seconds`, `notify` (`{"channel": "C…"}` or `D…` for a DM, plus
+  `"thread": "TS"`; omit for a job that never posts), and `retries` (0–10)
+- `prerun.sh` (optional): stdout `{"vars": {"NAME": "value"}}` fills `{{NAME}}`
+  in the prompt, or `{"skip": true, "reason": "Nothing new"}` skips the run
+- `postrun.sh` (optional): runs after each attempt with the result on stdin;
+  empty stdout accepts, `{"retry": true, "message": "What to fix"}` resumes the
+  agent with that message while `retries` remain
+
+Hooks run with Bash in the job directory. Send diagnostics, and commands that
+print such as `enso message send`, to stderr with `>&2`. Job output is saved,
+not posted; a job that may retry should notify from postrun after accepting.
+Details: https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md
 
 ## Instructions and skills
 
-Shared instructions are `$ENSO_HOME/AGENTS.md` and shared skills live in
-`$ENSO_HOME/.agents/skills/`; both apply to workspaces inside the Enso home.
-A workspace's own `AGENTS.md` and `.agents/skills/` apply only to that
-workspace. Put a skill in the workspace when only its conversations and jobs
-need it, and in the shared directory otherwise. `CLAUDE.md` and
-`.claude/skills` link to the same files for Claude Code.
+`$ENSO_HOME/AGENTS.md` and `$ENSO_HOME/.agents/skills/` apply to every
+workspace inside the Enso home; a workspace's own `AGENTS.md` and
+`.agents/skills/` apply only to it, so put a skill there when only it needs one.
+`CLAUDE.md` and `.claude/skills` link to the same files for Claude Code.
 
 ## Configuration and status
 

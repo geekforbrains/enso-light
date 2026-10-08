@@ -7,7 +7,7 @@ use crate::{
     slack::{self, Admission, Incoming, Slack},
 };
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, Local, Utc};
+use chrono::Local;
 use fs2::FileExt;
 use serde_json::{Value, json};
 use std::{
@@ -45,12 +45,6 @@ pub fn is_running(home: &Path) -> bool {
         return false;
     };
     file.try_lock_exclusive().is_err()
-}
-fn time(ms: i64) -> String {
-    DateTime::from_timestamp_millis(ms)
-        .unwrap_or_else(Utc::now)
-        .with_timezone(&Local)
-        .to_rfc3339()
 }
 fn redact(error: &str, loaded: &Loaded) -> String {
     let mut result = error.to_owned();
@@ -536,21 +530,15 @@ async fn execute_inner(
             dest.thread.clone().unwrap_or_default(),
         );
     }
-    let mut header = json!({"source":if incoming.is_some(){"slack"}else{"job"},"run_id":work.id,"provider":provider,"workspace":{"name":workspace_name,"path":workspace_path},"received_at":time(work.created_at),"started_at":Local::now().to_rfc3339()});
+    // Only what the agent cannot learn from its working directory or ENSO_* variables.
+    let mut header = json!({"source":if incoming.is_some(){"slack"}else{"job"}});
     let background = if let Some(conv) = &work.conversation {
         db.background(conv)?
     } else {
         Vec::new()
     };
-    header["background_ids"] = json!(
-        background
-            .iter()
-            .filter_map(|x| x["id"].as_str())
-            .collect::<Vec<_>>()
-    );
     let mut images = Vec::new();
     if let Some(input) = incoming {
-        header["conversation_id"] = json!(work.conversation);
         let user_name = if input.user_name.is_some() {
             input.user_name.clone()
         } else {
@@ -565,8 +553,6 @@ async fn execute_inner(
         header["channel"] = json!({"id":input.channel,"name":channel_name,"type":if input.channel_kind=="im"{"dm"}else{&input.channel_kind}});
         header["message_ts"] = json!(input.message_ts);
         header["thread_ts"] = json!(input.thread_ts);
-        header["reply"] =
-            json!({"mode":"automatic","channel":input.reply.channel,"thread":input.reply.thread});
         let directory = workspace.join("uploads").join(&work.id);
         let files = tokio::select! {
             _=cancel.cancelled()=>anyhow::bail!("cancelled"),
@@ -587,12 +573,10 @@ async fn execute_inner(
     let mut variables = BTreeMap::new();
     let mut request = work.request.clone();
     if let Some(job) = &job {
-        header["job"] = json!({"name":job.name,"directory":job.directory,"trigger":work.trigger});
+        header["job"] = json!({"name":job.name,"trigger":work.trigger});
         if let Some(occurrence) = &work.occurrence {
             header["job"]["scheduled_for"] = json!(occurrence);
         }
-        header["reply"] = json!({"mode":"none"});
-        header["notification_target"] = json!(target);
         if job.prerun {
             let output = runner::hook(
                 &job.directory.join("prerun.sh"),
@@ -616,19 +600,22 @@ async fn execute_inner(
         }
         request = jobs::interpolate(&job.prompt, &variables)?;
     }
-    let source = if incoming.is_some() { "slack" } else { "job" };
-    let mut prompt = context::render(
-        source,
-        work.session.is_none(),
-        &header,
-        &background,
-        &request,
-    )?;
+    let mut prompt = context::render(&header, &background, &request)?;
     let mut snapshot = serde_json::to_value(settings)?;
     snapshot["provider"] = json!(provider);
     snapshot["timeout_seconds"] = json!(timeout_seconds);
     snapshot["workspace"] = json!({"name":workspace_name,"path":workspace_path});
-    db.snapshot(&work.id, &prompt, &header, &snapshot)?;
+    // Stored, not shown: a successful run marks these background messages as seen.
+    let mut stored = header.clone();
+    if !background.is_empty() {
+        stored["background_ids"] = json!(
+            background
+                .iter()
+                .filter_map(|x| x["id"].as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+    db.snapshot(&work.id, &prompt, &stored, &snapshot)?;
     let max_attempts = job.as_ref().map_or(0, |job| job.retries) + 1;
     let mut session = work.session.clone();
     let mut attempts = Vec::new();
@@ -723,18 +710,13 @@ async fn execute_inner(
         let note = format!(
             "postrun.sh asked for a retry (attempt {attempt} of {max_attempts}):\n{message}"
         );
-        prompt = if session.is_some() {
-            context::render(source, false, &header, &background, &note)?
+        // A failed attempt leaves no session to resume, so start over with the original request.
+        let next = if session.is_some() {
+            note
         } else {
-            // A failed attempt leaves no session to resume, so start over with the original request.
-            context::render(
-                source,
-                true,
-                &header,
-                &background,
-                &format!("{request}\n\n{note}"),
-            )?
+            format!("{request}\n\n{note}")
         };
+        prompt = context::render(&header, &background, &next)?;
     }
 }
 

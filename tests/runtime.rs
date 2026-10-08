@@ -331,8 +331,6 @@ fn background_from_any_dm_thread_is_context_only_after_confirmed_send() {
     );
     assert!(!background.iter().any(|v| v["id"] == pending[0]));
     let prompt = context::render(
-        "slack",
-        false,
         &json!({"source":"slack","sender":{"id":"U1"}}),
         &background,
         "Summarize it.",

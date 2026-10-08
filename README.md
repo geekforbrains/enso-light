@@ -21,8 +21,9 @@ replies with your user ID; add it as `"dms": {"U012345": "main"}` in
 by every workspace inside it. Each workspace is a directory where its
 conversations and jobs run, with its own `AGENTS.md` and skills; the starter is
 `~/.enso/workspaces/main`. Claude Code and Codex run as they do in your
-terminal, with your own settings, in the workspace directory. See
-[configuration](docs/configuration.md#instructions-and-skills).
+terminal, with your own settings, in the workspace directory. Enso adds no
+instructions in code; the starter `AGENTS.md` is the guidance, so edit it to
+taste. See [configuration](docs/configuration.md#instructions-and-skills).
 
 Each DM shares one session across its threads; channel threads get separate
 sessions. Messages in a busy conversation queue behind its current turn.

@@ -39,19 +39,21 @@ redacted.
 
 ## Prompt context
 
-The first Slack turn gets concise delivery and workspace guidance: the working
-directory is that conversation's workspace, and other conversations and jobs may
-use other workspaces. Every turn
-gets fresh structured metadata identifying its source, provider, workspace
-(`{"name", "path"}`), sender, channel, message, reply destination, and
-attachments. Replies can follow a DM thread while sharing the DM's single
+Enso adds no instructions of its own; guidance lives in the home's `AGENTS.md`,
+which you edit. Each prompt is an `<enso-context>` JSON block, any background
+messages, and the request. The block has `source` (`slack` or `job`). Slack turns
+add `sender` (`{"id", "name"}`), `channel` (`{"id", "name", "type"}`),
+`message_ts`, `thread_ts`, and `attachments`. Jobs add `job` (`{"name",
+"trigger", "scheduled_for"}`), and the request is the rendered `prompt.md`. The
+workspace, run ID, and reply destination come from the working directory and the
+`ENSO_*` variables. Replies can follow a DM thread while sharing the DM's single
 session. Channel threads retain independent sessions.
 
-Jobs always get job-specific guidance and metadata. Rendered `prompt.md` is the
-user request. Confirmed background messages appear separately as previous context,
-with their source and time, before the next user request. Names and filenames are
-data; metadata serialization never turns them into shell code. Credentials are
-never part of prompt context.
+Background messages are messages Enso delivered to the conversation outside its
+session, such as a job's notification in a DM. They appear before the request as
+previous context, with their time, until a turn that included them succeeds.
+Names and filenames are data; serialization never turns them into shell code.
+Credentials are never part of prompt context.
 
 ## Restart behavior
 

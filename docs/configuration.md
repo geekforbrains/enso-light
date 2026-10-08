@@ -158,10 +158,13 @@ Agents read instructions and skills in two layers:
 | Workspace | `<workspace>/AGENTS.md` | `<workspace>/.agents/skills/` | That workspace |
 
 `CLAUDE.md` and `.claude/skills` link to the same files, so Claude Code and
-Codex share one copy. The bundled `enso` skill lives in the shared layer; add
-your own skills beside it, or in a workspace when only that workspace needs
-them. A workspace outside the Enso home, such as `${HOME}/Projects/acme`, gets
-only its own layer; copy or link anything it needs from the shared one.
+Codex share one copy. The starter `AGENTS.md` is all the guidance agents get
+about Enso: how replies and status updates work in Slack turns and jobs. Enso
+adds none in code, so edit it freely. The bundled `enso` skill lives in the shared
+layer; add your own skills beside it, or in a workspace when only that workspace
+needs them. A workspace outside the Enso home, such as `${HOME}/Projects/acme`,
+gets only its own layer, without the shared `AGENTS.md` or the `enso` skill;
+copy or link anything it needs from the shared one.
 
 Claude Code finds the shared layer by walking up from the workspace, alongside
 your own `~/.claude` configuration.

@@ -215,19 +215,15 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     assert_eq!(outcome["state"], "succeeded");
     assert_eq!(outcome["result"], "Provider finished");
     let prompt = fixture.captured("input", &run);
-    assert!(prompt.contains("running an unattended job"));
+    assert!(prompt.starts_with("<enso-context>\n"));
     assert!(prompt.ends_with("Current request:\nProduce 3 reports for Gavin. Ready: true."));
     assert!(!prompt.contains("private-provider-detail"));
     let (stored_prompt, header, settings) = fixture.snapshot(&run);
     assert_eq!(stored_prompt, prompt);
-    assert_eq!(header["source"], "job");
-    assert_eq!(header["run_id"], run.id);
-    assert_eq!(header["job"]["name"], "report");
-    assert_eq!(header["job"]["trigger"], "manual");
-    assert_eq!(header["reply"]["mode"], "none");
-    assert_eq!(header["notification_target"]["channel"], "DREPORT");
-    assert!(header.get("sender").is_none());
-    assert!(header.get("conversation_id").is_none());
+    assert_eq!(
+        header,
+        json!({"source":"job","job":{"name":"report","trigger":"manual"}})
+    );
     assert_eq!(settings["provider"], "main");
     assert_eq!(settings["cli"], "claude");
     assert!(settings["model"].is_null() && settings["effort"].is_null());
@@ -236,12 +232,10 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     let workspace = fixture.workspace("workspaces/main");
     let expected_workspace = json!({"name":"main","path":workspace});
     assert_eq!(settings["workspace"], expected_workspace);
-    assert_eq!(header["provider"], "main");
-    assert_eq!(header["workspace"], expected_workspace);
     assert_eq!(json_file(&directory.join("prerun-input.json")), header);
     let post = json_file(&directory.join("postrun-input.json"));
-    assert_eq!(post["run_id"], run.id);
     assert_eq!(post["source"], "job");
+    assert_eq!(post["job"], header["job"]);
     assert_eq!(
         post["variables"],
         json!({"COUNT":3,"NAME":"Gavin","READY":true})
@@ -367,14 +361,15 @@ async fn postrun_retry_resumes_the_session_with_its_message_until_accepted() {
         (json!(1), json!(3))
     );
     assert_eq!(second["attempt"], 2);
-    assert_eq!(second["run_id"], run.id);
+    assert_eq!(second["job"]["name"], "retry");
     let initial = read(&directory, "input-1.txt");
     assert!(initial.ends_with("Current request:\nUse the data."));
     assert_eq!(fixture.snapshot(&run).0, initial);
     assert!(!read(&directory, "args-1.txt").contains("--resume"));
     assert!(read(&directory, "args-2.txt").contains(&format!("--resume\n{SESSION}\n")));
     let retry = read(&directory, "input-2.txt");
-    assert!(!retry.contains("running an unattended job"));
+    assert!(retry.starts_with("<enso-context>\n"));
+    assert!(!retry.contains("Use the data."));
     assert!(retry.ends_with(
         "Current request:\npostrun.sh asked for a retry (attempt 2 of 3):\nThe chart is missing."
     ));
@@ -401,7 +396,6 @@ async fn postrun_retries_after_agent_failure_start_fresh_and_are_limited() {
     assert_eq!(outcome["attempts"][1]["status"], "failed");
     assert!(!read(&directory, "args-2.txt").contains("--resume"));
     let retry = read(&directory, "input-2.txt");
-    assert!(retry.contains("running an unattended job"));
     assert!(retry.ends_with(
         "Current request:\nUse the data.\n\npostrun.sh asked for a retry (attempt 2 of 2):\nTry again."
     ));
@@ -600,22 +594,25 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(session.workspace, fixture.workspace("workspaces/main"));
     let (prompt, header, _) = fixture.snapshot(&run);
     assert_eq!(prompt, fixture.captured("input", &run));
-    assert!(prompt.contains("You are Enso, a personal assistant reached through Slack."));
+    assert!(prompt.starts_with("<enso-context>\n"));
     assert!(prompt.contains("Earlier background report"));
     assert!(prompt.ends_with("Current request:\nFirst request"));
     assert_eq!(header["source"], "slack");
     assert_eq!(header["sender"], json!({"id":"UFIRST","name":"Gavin"}));
     assert_eq!(header["channel"]["type"], "dm");
-    assert_eq!(
-        header["reply"],
-        json!({"mode":"automatic","channel":"DCHAT","thread":null})
-    );
     assert_eq!(header["attachments"], json!([]));
+    // Background IDs are stored to mark the messages seen, but the agent only gets the messages.
     assert_eq!(header["background_ids"], json!([first_background]));
-    assert_eq!(
-        header["workspace"],
-        json!({"name":"main","path":fixture.workspace("workspaces/main")})
-    );
+    assert!(!prompt.contains("background_ids"));
+    for dropped in [
+        "reply",
+        "workspace",
+        "provider",
+        "run_id",
+        "conversation_id",
+    ] {
+        assert!(header.get(dropped).is_none(), "{dropped}");
+    }
     assert_eq!(
         fixture.captured("env", &run),
         format!(
@@ -681,14 +678,13 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(completion.0, "succeeded");
     assert_eq!(completion.3.unwrap().id, SESSION);
     let (prompt, header, settings) = fixture.snapshot(&resumed);
-    assert!(!prompt.contains("You are Enso, a personal assistant reached through Slack."));
     assert!(!prompt.contains("Earlier background report"));
     assert!(!prompt.contains("Unrelated conversation report"));
     assert!(prompt.contains("New background report"));
     assert!(prompt.ends_with("Current request:\nFollow-up request"));
     assert_eq!(header["sender"], json!({"id":"USECOND","name":"Alex"}));
     assert_eq!(header["message_ts"], second.message_ts);
-    assert_eq!(header["reply"]["thread"], "1700000001.000001");
+    assert_eq!(header["thread_ts"], "1700000001.000001");
     assert_eq!(header["background_ids"], json!([second_background]));
     assert_eq!(header["attachments"], json!([]));
     assert_eq!(settings["provider"], "opus");
@@ -696,7 +692,6 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     assert_eq!(settings["effort"], "low");
     assert_eq!(settings["args"], json!(["--opus"]));
     assert_eq!(settings["timeout_seconds"], 7);
-    assert_eq!(header["provider"], "opus");
     assert_eq!(
         fixture.captured("env", &resumed),
         format!(
@@ -843,9 +838,7 @@ async fn chat_runs_in_the_routed_workspace_with_its_provider() {
             .join(&run.id)
             .exists()
     );
-    let (_, header, settings) = fixture.snapshot(&run);
-    assert_eq!(header["workspace"], json!({"name":"acme","path":acme}));
-    assert_eq!(header["provider"], "opus");
+    let (_, _, settings) = fixture.snapshot(&run);
     assert_eq!(settings["workspace"], json!({"name":"acme","path":acme}));
     assert_eq!(settings["provider"], "opus");
 }
@@ -928,8 +921,7 @@ async fn jobs_select_a_named_provider_and_their_own_timeout() {
     .unwrap();
     fixture.run_job(&run).await;
     assert_eq!(fixture.db.run(&run.id).unwrap()["state"], "succeeded");
-    let (_, header, settings) = fixture.snapshot(&run);
-    assert_eq!(header["provider"], "opus");
+    let (_, _, settings) = fixture.snapshot(&run);
     assert_eq!(settings["provider"], "opus");
     assert_eq!(settings["timeout_seconds"], 9);
     let args = fixture.captured("args", &run);
@@ -937,8 +929,6 @@ async fn jobs_select_a_named_provider_and_their_own_timeout() {
         args.contains("--opus\n--model\nopus\n--effort\nlow\n"),
         "{args}"
     );
-    let post = json_file(&directory.join("postrun-input.json"));
-    assert_eq!(post["provider"], "opus");
 }
 
 #[tokio::test]
@@ -966,10 +956,9 @@ async fn job_provider_wins_over_the_workspace_provider_then_the_default() {
         let run = fixture.db.claim().unwrap().unwrap();
         fixture.run_job(&run).await;
         assert_eq!(fixture.db.run(&run.id).unwrap()["state"], "succeeded");
-        let (_, header, settings) = fixture.snapshot(&run);
-        assert_eq!(header["provider"], provider, "{name}");
+        let (_, _, settings) = fixture.snapshot(&run);
         assert_eq!(settings["provider"], provider, "{name}");
-        assert_eq!(header["workspace"], json!({"name":"acme","path":acme}));
+        assert_eq!(settings["workspace"], json!({"name":"acme","path":acme}));
         // The agent runs in the workspace; hooks stay in the job directory.
         assert!(
             fixture

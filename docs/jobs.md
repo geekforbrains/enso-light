@@ -112,8 +112,8 @@ skip instead:
 ```
 
 A skip runs neither the agent nor postrun. A failed prerun prevents the agent
-and postrun from running. Prerun receives the run's context JSON on stdin and
-runs once per run. Timeouts and cancellation stop a hook's process group. Hook
+and postrun from running. Prerun receives the run's context JSON on stdin (the
+same `<enso-context>` block the agent gets) and runs once per run. Timeouts and cancellation stop a hook's process group. Hook
 failure is visible in the job's outcome.
 
 Enso sets `ENSO_HOME`, `ENSO_WORKSPACE` (the workspace's absolute path),
@@ -124,9 +124,11 @@ Enso sets `ENSO_HOME`, `ENSO_WORKSPACE` (the workspace's absolute path),
 these metadata variables and overrides conflicting values from the inherited
 environment or `.env`.
 
-Job turns get separate guidance and metadata identifying the job, provider,
-trigger, scheduled time, workspace name and path, and notification destination.
-They never inherit a Slack sender's identity or a chat session.
+A job's context JSON is `{"source": "job", "job": {"name", "trigger",
+"scheduled_for"}}`: `trigger` is `cron` or `manual`, and `scheduled_for` is set
+only for cron runs. Hooks and the agent read the workspace, run ID, job name, and
+notify destination from the variables above. Jobs never inherit a Slack sender's
+identity or a chat session.
 
 ### Postrun and retries
 

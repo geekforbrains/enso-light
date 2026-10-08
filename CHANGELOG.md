@@ -5,6 +5,17 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Upgrading from 0.2.0
+
+1. `enso init` never overwrites files, so merge the new starter
+   [`AGENTS.md`](https://github.com/geekforbrains/enso-light/blob/main/bundled/AGENTS.md)
+   and [`enso` skill](https://github.com/geekforbrains/enso-light/blob/main/bundled/SKILL.md)
+   into `~/.enso/AGENTS.md` and `~/.enso/.agents/skills/enso/SKILL.md` by hand.
+   Enso no longer adds this guidance in code, so without the merge agents lose it.
+2. Hooks that read `.workspace.path`, `.run_id`, `.provider`, or
+   `.notification_target` from stdin switch to `$ENSO_WORKSPACE`,
+   `$ENSO_RUN_ID`, and `$ENSO_CHANNEL` / `$ENSO_THREAD_TS`.
+
 ### Changed
 
 - Claude Code runs use your normal `~/.claude` settings, skills, plugins, and
@@ -20,6 +31,17 @@ Versioning and publication follow the [release flow](docs/releases.md).
   instead of a guessed category such as `authentication_failed`. The end of the
   CLI's output now goes to the service log, with secrets redacted; a session
   that cannot be resumed still says to use `!clear`.
+- **Breaking:** Enso adds no guidance of its own to prompts. The delivery,
+  status-update, and job guidance it used to prepend to a new session now lives
+  in the starter `AGENTS.md`, where you can edit it, and the `enso` skill is now
+  only the CLI reference.
+- **Breaking:** the `<enso-context>` block, which prerun and postrun also get on
+  stdin, keeps only what an agent cannot otherwise know: `source`; `sender`,
+  `channel`, `message_ts`, `thread_ts`, and `attachments` for Slack turns; and
+  `job` (`name`, `trigger`, `scheduled_for`) for jobs. `run_id`, `provider`,
+  `workspace`, `received_at`, `started_at`, `conversation_id`, `reply`,
+  `notification_target`, and `job.directory` are gone; use the `ENSO_*`
+  variables and the working directory.
 - **Breaking:** Codex runs no longer get `--skip-git-repo-check`. Workspaces
   inside the Enso home are in its git repository; for a Codex workspace
   elsewhere, trust the folder in Codex or add `--skip-git-repo-check` to the
