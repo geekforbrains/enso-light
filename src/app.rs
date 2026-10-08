@@ -69,7 +69,10 @@ struct Event {
 pub async fn run(home: PathBuf) -> Result<()> {
     let loaded = config::load(&home)?;
     loaded.validate()?;
-    jobs::list(&home, &loaded.config)?;
+    let mut job_errors = HashMap::new();
+    for error in scheduled_jobs(&home, &loaded.config, &mut job_errors).1 {
+        eprintln!("Job schedule: {}", redact(&error, &loaded));
+    }
     let _lock = lock(&home)?;
     for path in config::scaffold(&loaded.config)? {
         eprintln!("Created workspace {}", path.display());
@@ -130,7 +133,7 @@ pub async fn run(home: PathBuf) -> Result<()> {
             db.heartbeat()?;
             for(id,token)in &running{if db.cancelled(id)?{token.cancel();}}
             let now=Local::now();let key=now.format("%Y-%m-%dT%H:%M").to_string();
-            if key!=minute {minute=key.clone();match jobs::list(&home,config){Ok(jobs)=>for job in jobs {if job.enabled && let Some(cron)=&job.cron && jobs::due(cron,now)?{db.enqueue_job(&job.name,"cron",Some(&key))?;}},Err(error)=>eprintln!("Job schedule: {error:#}")}}
+            if key!=minute {minute=key.clone();let(jobs,errors)=scheduled_jobs(&home,config,&mut job_errors);for error in errors{eprintln!("Job schedule: {}",redact(&error,&loaded));}for job in jobs {if job.enabled && let Some(cron)=&job.cron && jobs::due(cron,now)?{db.enqueue_job(&job.name,"cron",Some(&key))?;}}}
             dispatch_ready(&db, |work| {let token=cancel.child_token();running.insert(work.id.clone(),token.clone());let (home,db,slack,loaded)=(home.clone(),db.clone(),slack.clone(),loaded.clone());tasks.spawn(async move{let id=work.id.clone();if let Err(error)=execute(&home,&db,&slack,&loaded,&work,token).await{let error=redact(&format!("{error:#}"),&loaded);eprintln!("Run {id}: {error}");let _=db.finish(&id,"failed","",Some(&error),None);}id});})?;
         }
       }}Ok(())
@@ -149,6 +152,47 @@ pub async fn run(home: PathBuf) -> Result<()> {
     // Leave any queued turns for startup recovery to report as interrupted.
     db.runtime("stopped", None)?;
     result
+}
+
+/// Valid jobs, plus errors to log: an invalid job is skipped and its error is
+/// reported only when it first appears or changes.
+fn scheduled_jobs(
+    home: &Path,
+    config: &Config,
+    logged: &mut HashMap<String, String>,
+) -> (Vec<jobs::Job>, Vec<String>) {
+    let mut valid = Vec::new();
+    let mut errors = BTreeMap::new();
+    match jobs::list(home, config) {
+        Ok(entries) => {
+            for (name, job) in entries {
+                match job {
+                    Ok(job) => valid.push(job),
+                    Err(error) => {
+                        errors.insert(name, format!("{error:#}"));
+                    }
+                }
+            }
+        }
+        // Job names are never empty, so this key cannot collide.
+        Err(error) => {
+            errors.insert(String::new(), format!("{error:#}"));
+        }
+    }
+    (valid, changed_errors(logged, errors))
+}
+
+/// Remembers the current errors and returns those not already logged.
+fn changed_errors(
+    logged: &mut HashMap<String, String>,
+    current: BTreeMap<String, String>,
+) -> Vec<String> {
+    logged.retain(|name, _| current.contains_key(name));
+    current
+        .into_iter()
+        .filter(|(name, error)| logged.insert(name.clone(), error.clone()).as_ref() != Some(error))
+        .map(|(_, error)| error)
+        .collect()
 }
 
 fn dispatch_ready(db: &Db, mut start: impl FnMut(Run)) -> Result<()> {

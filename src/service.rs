@@ -72,8 +72,13 @@ pub fn upgrade_installed(home: &Path, executable: &Path) -> Result<bool> {
 }
 
 pub fn install(home: &Path) -> Result<Value> {
+    let check = crate::config::check(home);
+    ensure!(
+        check.valid,
+        "enso config check found problems; fix them before installing: {}",
+        check.errors.join("; ")
+    );
     let loaded = crate::config::load(home)?;
-    loaded.validate()?;
     // The service unit does not inherit the installing shell's Slack tokens.
     for name in ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"] {
         ensure!(

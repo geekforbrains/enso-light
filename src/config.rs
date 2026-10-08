@@ -26,22 +26,21 @@ fn optional<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>
 }
 
 impl Provider {
-    pub fn validate(&self, name: &str) -> Result<()> {
-        ensure!(
-            !self.cli.trim().is_empty(),
-            "providers.{name}.cli is blank; set \"claude\" or \"codex\""
-        );
-        ensure!(
-            matches!(self.cli.as_str(), "claude" | "codex"),
-            "providers.{name}.cli must be \"claude\" or \"codex\""
-        );
-        for (field, value) in [("model", &self.model), ("effort", &self.effort)] {
-            ensure!(
-                !value.as_ref().is_some_and(|s| s.starts_with('-')),
-                "providers.{name}.{field} must not start with -"
-            );
+    fn problems(&self, name: &str, errors: &mut Vec<String>) {
+        if self.cli.trim().is_empty() {
+            errors.push(format!(
+                "providers.{name}.cli is blank; set \"claude\" or \"codex\""
+            ));
+        } else if !matches!(self.cli.as_str(), "claude" | "codex") {
+            errors.push(format!(
+                "providers.{name}.cli must be \"claude\" or \"codex\""
+            ));
         }
-        Ok(())
+        for (field, value) in [("model", &self.model), ("effort", &self.effort)] {
+            if value.as_ref().is_some_and(|s| s.starts_with('-')) {
+                errors.push(format!("providers.{name}.{field} must not start with -"));
+            }
+        }
     }
 }
 
@@ -120,11 +119,36 @@ impl Destination {
 }
 
 /// A channel's workspace name, or its workspace and mention mode.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum ChannelRoute {
     Workspace(String),
     Settings(ChannelSettings),
+}
+
+/// Unlike an untagged derive, keeps the settings' field errors (such as an
+/// old `top_level` key) instead of a generic "did not match any variant".
+impl<'de> Deserialize<'de> for ChannelRoute {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Route;
+        impl<'de> serde::de::Visitor<'de> for Route {
+            type Value = ChannelRoute;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a workspace name or {\"workspace\": NAME, \"mention\": MODE}")
+            }
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<ChannelRoute, E> {
+                Ok(ChannelRoute::Workspace(name.into()))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<ChannelRoute, A::Error> {
+                ChannelSettings::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(ChannelRoute::Settings)
+            }
+        }
+        deserializer.deserialize_any(Route)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -208,73 +232,84 @@ pub struct Config {
     pub slack: SlackConfig,
 }
 
+/// Fails with every problem, joined, when there is any.
+fn fail(problems: Vec<String>) -> Result<()> {
+    ensure!(problems.is_empty(), "{}", problems.join("; "));
+    Ok(())
+}
+
 impl Config {
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.providers.is_empty(),
-            "providers must define at least one provider"
-        );
-        for (name, provider) in &self.providers {
-            provider.validate(name)?;
+        fail(self.problems())
+    }
+
+    /// Every problem in the configuration itself, without inspecting the filesystem.
+    pub fn problems(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.providers.is_empty() {
+            errors.push("providers must define at least one provider".into());
         }
-        ensure!(
-            !self.defaults.provider.trim().is_empty(),
-            "defaults.provider is blank; name one of providers"
-        );
-        ensure!(
-            self.providers.contains_key(&self.defaults.provider),
-            "defaults.provider {:?} is not defined in providers",
-            self.defaults.provider
-        );
-        ensure!(
-            self.defaults.timeout_seconds > 0,
-            "defaults.timeout_seconds must be greater than zero"
-        );
-        ensure!(
-            !self.workspaces.is_empty(),
-            "workspaces must define at least one workspace"
-        );
+        for (name, provider) in &self.providers {
+            provider.problems(name, &mut errors);
+        }
+        if self.defaults.provider.trim().is_empty() {
+            errors.push("defaults.provider is blank; name one of providers".into());
+        } else if !self.providers.contains_key(&self.defaults.provider) {
+            errors.push("defaults.provider is not defined in providers".into());
+        }
+        if self.defaults.timeout_seconds == 0 {
+            errors.push("defaults.timeout_seconds must be greater than zero".into());
+        }
+        if self.workspaces.is_empty() {
+            errors.push("workspaces must define at least one workspace".into());
+        }
         for (name, workspace) in &self.workspaces {
-            ensure!(
-                valid_name(name),
-                "workspace name {name:?} may contain only letters, numbers, hyphens, and underscores"
-            );
-            ensure!(
-                workspace.path.is_absolute(),
-                "workspaces.{name}.path must be absolute; use ${{ENSO_HOME}}/... for paths inside the Enso home"
-            );
-            if let Some(provider) = &workspace.provider {
-                ensure!(
-                    self.providers.contains_key(provider),
-                    "workspaces.{name}.provider {provider:?} is not defined in providers"
-                );
+            if !valid_name(name) {
+                errors.push(format!(
+                    "workspace name {name:?} may contain only letters, numbers, hyphens, and underscores"
+                ));
+            }
+            if !workspace.path.is_absolute() {
+                errors.push(format!(
+                    "workspaces.{name}.path must be absolute; use ${{ENSO_HOME}}/... for paths inside the Enso home"
+                ));
+            }
+            if let Some(provider) = &workspace.provider
+                && !self.providers.contains_key(provider)
+            {
+                errors.push(format!(
+                    "workspaces.{name}.provider is not defined in providers"
+                ));
             }
         }
         for (key, workspace) in &self.slack.dms {
-            ensure!(
-                route_key(key, b"UW"),
-                "slack.dms key {key:?} must be \"*\" or a Slack user ID such as U012345"
-            );
-            ensure!(
-                self.workspaces.contains_key(workspace),
-                "slack.dms.{key} names workspace {workspace:?}, which is not defined in workspaces"
-            );
+            if !route_key(key, b"UW") {
+                errors.push(format!(
+                    "slack.dms key {key:?} must be \"*\" or a Slack user ID such as U012345"
+                ));
+            }
+            if !self.workspaces.contains_key(workspace) {
+                errors.push(format!(
+                    "slack.dms.{key} names a workspace that is not defined in workspaces"
+                ));
+            }
         }
         for (key, route) in &self.slack.channels {
-            ensure!(
-                route_key(key, b"CG"),
-                "slack.channels key {key:?} must be \"*\" or a channel ID such as C012345"
-            );
-            ensure!(
-                self.workspaces.contains_key(route.workspace()),
-                "slack.channels.{key} names workspace {:?}, which is not defined in workspaces",
-                route.workspace()
-            );
+            if !route_key(key, b"CG") {
+                errors.push(format!(
+                    "slack.channels key {key:?} must be \"*\" or a channel ID such as C012345"
+                ));
+            }
+            if !self.workspaces.contains_key(route.workspace()) {
+                errors.push(format!(
+                    "slack.channels.{key} names a workspace that is not defined in workspaces"
+                ));
+            }
         }
         if self.slack.working_reaction.is_empty() {
-            bail!("slack.working_reaction must not be empty");
+            errors.push("slack.working_reaction must not be empty".into());
         }
-        Ok(())
+        errors
     }
 
     /// Resolves an explicit provider name, or `defaults.provider`.
@@ -305,13 +340,18 @@ pub struct Tokens {
 
 impl Tokens {
     pub fn validate(&self) -> Result<()> {
-        for (name, value) in [
+        fail(self.problems())
+    }
+
+    pub fn problems(&self) -> Vec<String> {
+        [
             ("SLACK_BOT_TOKEN", &self.bot),
             ("SLACK_APP_TOKEN", &self.app),
-        ] {
-            ensure!(!value.trim().is_empty(), "{name} is blank; set it in .env");
-        }
-        Ok(())
+        ]
+        .into_iter()
+        .filter(|(_, value)| value.trim().is_empty())
+        .map(|(name, _)| format!("{name} is blank; set it in .env"))
+        .collect()
     }
 
     pub fn secrets(&self) -> impl Iterator<Item = &String> {
@@ -329,9 +369,87 @@ pub struct Loaded {
 
 impl Loaded {
     pub fn validate(&self) -> Result<()> {
-        self.config.validate()?;
-        self.tokens.validate()
+        fail(self.problems())
     }
+
+    pub fn problems(&self) -> Vec<String> {
+        let mut errors = self.config.problems();
+        errors.extend(self.tokens.problems());
+        errors
+    }
+}
+
+/// The result of `enso config check`.
+#[derive(Debug, Default, Serialize)]
+pub struct Check {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub notes: Vec<String>,
+    pub providers: usize,
+    pub workspaces: usize,
+    pub jobs: usize,
+}
+
+/// Collects every configuration and job problem, never echoing substituted values.
+pub fn check(home: &Path) -> Check {
+    let mut check = Check::default();
+    match load(home) {
+        Err(error) => check.errors.push(format!("{error:#}")),
+        Ok(loaded) => {
+            let config = &loaded.config;
+            check.errors = loaded.problems();
+            check.providers = config.providers.len();
+            check.workspaces = config.workspaces.len();
+            if config.slack.dms.is_empty() && config.slack.channels.is_empty() {
+                check.notes.push(if config.slack.unconfigured_message.is_empty() {
+                    "no dms or channels are configured; Enso will ignore every message".into()
+                } else {
+                    "no dms or channels are configured; Enso will reply \"not configured\" to every message".into()
+                });
+            }
+            for (name, workspace) in &config.workspaces {
+                if !workspace.path.is_absolute() {
+                    continue;
+                }
+                match fs::metadata(&workspace.path) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => check.errors.push(format!(
+                        "workspaces.{name}.path exists but is not a directory"
+                    )),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        check.notes.push(format!("workspaces.{name}.path does not exist yet; it will be created on init or service start"))
+                    }
+                    Err(error) => check.errors.push(format!(
+                        "workspaces.{name}.path cannot be inspected: {}",
+                        error.kind()
+                    )),
+                }
+            }
+            if config.providers.values().any(|p| p.cli == "codex")
+                && fs::symlink_metadata(home.join(".git")).is_err()
+            {
+                check.notes.push("the Enso home is not a git repository, so Codex will not load the shared AGENTS.md and .agents/skills; run enso init or git init in the home".into());
+            }
+            match crate::jobs::list(home, config) {
+                Ok(jobs) => {
+                    check.jobs = jobs.len();
+                    check.errors.extend(
+                        jobs.into_iter()
+                            .filter_map(|(_, job)| job.err().map(|e| format!("{e:#}"))),
+                    );
+                }
+                Err(error) => check.errors.push(format!("{error:#}")),
+            }
+        }
+    }
+    check.valid = check.errors.is_empty();
+    check
+}
+
+/// Serde's message only when it names fields and cannot echo a value.
+pub fn safe_detail(error: &serde_json::Error) -> Option<String> {
+    let text = error.to_string();
+    (text.starts_with("unknown field `") || text.starts_with("missing field `")).then_some(text)
 }
 
 pub fn load(home: &Path) -> Result<Loaded> {
@@ -355,9 +473,17 @@ fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loa
         serde_json::from_slice(&config).context("invalid Enso config.json")?;
     expand_value(&mut value, &variables)?;
     // Avoid serde's invalid-value diagnostics echoing a substituted credential.
-    let config: Config = serde_json::from_value(value).map_err(|_| {
-        anyhow::anyhow!("invalid config.json fields or value types; see docs/configuration.md")
-    })?;
+    let config: Config =
+        serde_json::from_value(value).map_err(|error| match safe_detail(&error) {
+            Some(detail) => {
+                anyhow::anyhow!("invalid config.json: {detail}; see docs/configuration.md")
+            }
+            None => {
+                anyhow::anyhow!(
+                    "invalid config.json fields or value types; see docs/configuration.md"
+                )
+            }
+        })?;
     Ok(Loaded {
         config,
         env,
@@ -861,7 +987,68 @@ mod tests {
         }
         let leftover = r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}},"execution":{"cli":"claude"}}"#;
         let error = format!("{:#}", load_config(leftover, "", &[]).1.unwrap_err());
-        assert!(error.contains("invalid config.json fields"), "{error}");
+        assert!(
+            error.starts_with("invalid config.json: unknown field `execution`, expected one of"),
+            "{error}"
+        );
+        let missing = format!(
+            "{:#}",
+            load_config(r#"{"providers":{}}"#, "", &[]).1.unwrap_err()
+        );
+        assert!(missing.contains("missing field `defaults`"), "{missing}");
+        let typed = r#"{"defaults":{"provider":"main","timeout_seconds":"${SLACK_BOT_TOKEN}"},"providers":{"main":{"cli":"claude"}}}"#;
+        let error = format!(
+            "{:#}",
+            load_config(typed, "SLACK_BOT_TOKEN=fake-secret-bot-token\n", &[])
+                .1
+                .unwrap_err()
+        );
+        assert_eq!(
+            error,
+            "invalid config.json fields or value types; see docs/configuration.md"
+        );
+    }
+
+    #[test]
+    fn every_problem_is_reported_at_once() {
+        let config = r#"{
+            "defaults": {"provider": "", "timeout_seconds": 0},
+            "providers": {"main": {"cli": ""}, "other": {"cli": "gemini", "model": "-x"}},
+            "workspaces": {"bad name": {"path": "relative", "provider": "missing"}},
+            "slack": {"dms": {"D1": "nowhere"}, "channels": {"general": {"workspace": "nowhere"}}}
+        }"#;
+        let (_temp, loaded) = load_config(config, "", &[]);
+        let loaded = loaded.unwrap();
+        let problems = loaded.problems();
+        for message in [
+            "providers.main.cli is blank",
+            "providers.other.cli must be",
+            "providers.other.model must not start with -",
+            "defaults.provider is blank",
+            "defaults.timeout_seconds must be greater than zero",
+            "workspace name \"bad name\" may contain only",
+            "workspaces.bad name.path must be absolute",
+            "workspaces.bad name.provider is not defined",
+            "slack.dms key \"D1\"",
+            "slack.dms.D1 names a workspace that is not defined",
+            "slack.channels key \"general\"",
+            "slack.channels.general names a workspace that is not defined",
+            "SLACK_BOT_TOKEN is blank",
+            "SLACK_APP_TOKEN is blank",
+        ] {
+            assert_eq!(
+                problems.iter().filter(|p| p.contains(message)).count(),
+                1,
+                "{message}: {problems:#?}"
+            );
+        }
+        assert_eq!(problems.len(), 14, "{problems:#?}");
+        let error = loaded.validate().unwrap_err().to_string();
+        assert!(
+            error.starts_with("providers.main.cli is blank")
+                && error.contains("; SLACK_APP_TOKEN is blank"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -916,7 +1103,7 @@ mod tests {
             ),
             (
                 r#"{"defaults":{"provider":"other"},"providers":{"main":{"cli":"claude"}}}"#,
-                "defaults.provider \"other\" is not defined in providers",
+                "defaults.provider is not defined in providers",
             ),
             (
                 r#"{"defaults":{"provider":""},"providers":{"main":{"cli":"claude"}}}"#,
@@ -1019,7 +1206,7 @@ mod tests {
             (
                 r#"{"main":{"path":"/srv","provider":"opus"}}"#,
                 "{}",
-                "workspaces.main.provider \"opus\" is not defined in providers",
+                "workspaces.main.provider is not defined in providers",
             ),
             (
                 main,
@@ -1031,7 +1218,7 @@ mod tests {
             (
                 main,
                 r#"{"dms":{"U1":"acme"}}"#,
-                "slack.dms.U1 names workspace \"acme\"",
+                "slack.dms.U1 names a workspace that is not defined",
             ),
             (
                 main,
@@ -1046,25 +1233,34 @@ mod tests {
             (
                 main,
                 r#"{"channels":{"*":{"workspace":"acme"}}}"#,
-                "slack.channels.* names workspace \"acme\"",
+                "slack.channels.* names a workspace that is not defined",
             ),
         ] {
             let error = format!("{:#}", routed(workspaces, slack).unwrap_err());
             assert!(error.contains(message), "{workspaces} {slack}: {error}");
         }
-        for slack in [
-            r#"{"dm_users":["U1"]}"#,
-            r#"{"mentions":{"top_level":true,"thread":true}}"#,
-            r#"{"channels":{"C1":{"top_level":true,"thread":false}}}"#,
-            r#"{"channels":{"C1":{"workspace":"main","mention":"sometimes"}}}"#,
-            r#"{"channels":{"C1":{"workspace":"main","thread":false}}}"#,
-            r#"{"dms":["U1"]}"#,
+        for (slack, message) in [
+            (r#"{"dm_users":["U1"]}"#, "unknown field `dm_users`"),
+            (
+                r#"{"mentions":{"top_level":true,"thread":true}}"#,
+                "unknown field `mentions`",
+            ),
+            (
+                r#"{"channels":{"C1":{"top_level":true,"thread":false}}}"#,
+                "invalid config.json: unknown field `thread`, expected `workspace` or `mention`",
+            ),
+            (
+                r#"{"channels":{"C1":{"workspace":"main","mention":"sometimes"}}}"#,
+                "invalid config.json fields",
+            ),
+            (
+                r#"{"channels":{"C1":{"workspace":"main","thread":false}}}"#,
+                "unknown field `thread`",
+            ),
+            (r#"{"dms":["U1"]}"#, "invalid config.json fields"),
         ] {
             let error = format!("{:#}", routed(main, slack).unwrap_err());
-            assert!(
-                error.contains("invalid config.json fields"),
-                "{slack}: {error}"
-            );
+            assert!(error.contains(message), "{slack}: {error}");
         }
         let (_temp, loaded) = load_config(
             r#"{"defaults":{"provider":"main","mention":"top_level"},"providers":{"main":{"cli":"claude"}}}"#,

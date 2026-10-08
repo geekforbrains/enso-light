@@ -176,12 +176,13 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Config {
             command: ConfigCommand::Check,
         } => {
-            let loaded = config::load(&home)?;
-            loaded.validate()?;
-            let jobs = jobs::list(&home, &loaded.config)?;
-            print(
-                &json!({"valid":true,"provider":loaded.config.defaults.provider,"jobs":jobs.len()}),
-                cli.json,
+            let check = config::check(&home);
+            print(&json!(check), cli.json);
+            let count = check.errors.len();
+            ensure!(
+                check.valid,
+                "config check found {count} error{}",
+                if count == 1 { "" } else { "s" }
             );
         }
         Command::Jobs {
@@ -190,7 +191,14 @@ async fn execute(cli: Cli) -> Result<()> {
             let loaded = config::load(&home)?;
             let db = Db::open(&home)?;
             let mut rows = Vec::new();
-            for job in jobs::list(&home, &loaded.config)? {
+            for (name, job) in jobs::list(&home, &loaded.config)? {
+                let job = match job {
+                    Ok(job) => job,
+                    Err(error) => {
+                        rows.push(json!({"name":name,"error":format!("{error:#}"),"last_run":db.last_job(&name)?}));
+                        continue;
+                    }
+                };
                 let next = if job.enabled {
                     job.cron
                         .as_ref()
@@ -207,9 +215,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Jobs {
             command: JobsCommand::Run { name, wait },
         } => {
-            active(&home)?;
             let loaded = config::load(&home)?;
             jobs::load(&home, &name, &loaded.config)?;
+            active(&home)?;
             let db = Db::open(&home)?;
             let id = db
                 .enqueue_job(&name, "manual", None)?

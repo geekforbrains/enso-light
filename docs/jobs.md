@@ -35,10 +35,8 @@ there. Leave it out for a job that never posts.
 [providers](configuration.md#providers); without it the job uses the
 workspace's `provider`, then `defaults.provider`. `timeout_seconds` optionally
 replaces `defaults.timeout_seconds` (greater than zero) for each of the job's
-processes: every agent attempt, prerun, and postrun. Enso rejects a job that
-leaves out `workspace` or names an unknown workspace or provider when it loads
-the job: in `enso config check`, at service start, in the scheduler, in
-`enso jobs list` and `enso jobs run`, and at run start.
+processes: every agent attempt, prerun, and postrun. A job that leaves out
+`workspace` or names an unknown workspace or provider is invalid.
 
 `retries` is how many extra attempts postrun may request in one run (default 0,
 at most 10). See [Postrun and retries](#postrun-and-retries).
@@ -75,6 +73,23 @@ it is not automatically posted to Slack. Use `enso message send` from the agent
 or postrun when notification is wanted. Without `--to`, it posts to `notify`; a
 job without `notify` must name `--to`. Triggering a job from Slack does not change
 its destination.
+
+## Invalid jobs
+
+Enso checks each job whenever it loads jobs, and an invalid job never stops the
+others or Slack:
+
+- `enso config check` lists every invalid job's error, prefixed with
+  `job NAME:`, and exits non-zero.
+- The service skips an invalid job at startup and each scheduler minute, logging
+  its error when it first appears or changes rather than every minute.
+- `enso jobs list` shows an invalid job as `{"name": ..., "error": ...,
+  "last_run": ...}` alongside the valid ones.
+- `enso jobs run NAME` fails with the job's error, and a queued run whose job
+  became invalid fails with it at run start.
+
+An unknown or missing `job.json` field is named in the error (for example
+``unknown field `execution` ``); other invalid values get a generic message.
 
 ## Hooks and variables
 

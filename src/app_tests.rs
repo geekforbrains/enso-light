@@ -1328,3 +1328,69 @@ fn routing_a_channel_later_admits_new_messages_but_not_replayed_events() {
     );
     assert!(fixture.replies().is_empty());
 }
+
+#[test]
+fn invalid_jobs_are_skipped_and_logged_once_per_distinct_error() {
+    let fixture = Fixture::new(false);
+    let jobs = fixture.home.path().join("jobs");
+    for (name, definition) in [
+        ("good", r#"{"workspace":"main","cron":"* * * * *"}"#),
+        ("bad", r#"{"workspace":"other"}"#),
+    ] {
+        fs::create_dir(jobs.join(name)).unwrap();
+        fs::write(jobs.join(name).join("job.json"), definition).unwrap();
+        fs::write(jobs.join(name).join("prompt.md"), "Fake job.").unwrap();
+    }
+    let config = &fixture.loaded.config;
+    let mut logged = HashMap::new();
+    // Startup and every scheduler minute share this path; an invalid job never fails it.
+    let (valid, errors) = scheduled_jobs(fixture.home.path(), config, &mut logged);
+    assert_eq!(valid.len(), 1);
+    assert_eq!(valid[0].name, "good");
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors[0].starts_with("job bad: invalid workspace"),
+        "{errors:?}"
+    );
+    let (valid, errors) = scheduled_jobs(fixture.home.path(), config, &mut logged);
+    assert_eq!(valid.len(), 1);
+    assert!(errors.is_empty(), "{errors:?}");
+    fs::write(
+        jobs.join("bad/job.json"),
+        r#"{"workspace":"main","retries":99}"#,
+    )
+    .unwrap();
+    let (_, errors) = scheduled_jobs(fixture.home.path(), config, &mut logged);
+    assert_eq!(errors, ["job bad: retries must be at most 10"]);
+    fs::write(jobs.join("bad/job.json"), r#"{"workspace":"main"}"#).unwrap();
+    let (valid, errors) = scheduled_jobs(fixture.home.path(), config, &mut logged);
+    assert_eq!(valid.len(), 2);
+    assert!(errors.is_empty() && logged.is_empty());
+}
+
+#[test]
+fn changed_errors_reports_new_and_changed_errors_and_forgets_cleared_ones() {
+    let mut logged = HashMap::new();
+    let errors = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        changed_errors(&mut logged, errors(&[("a", "one"), ("b", "two")])),
+        ["one", "two"]
+    );
+    assert!(changed_errors(&mut logged, errors(&[("a", "one"), ("b", "two")])).is_empty());
+    assert_eq!(
+        changed_errors(&mut logged, errors(&[("a", "changed")])),
+        ["changed"]
+    );
+    assert!(!logged.contains_key("b"));
+    assert!(changed_errors(&mut logged, errors(&[])).is_empty());
+    assert_eq!(
+        changed_errors(&mut logged, errors(&[("a", "changed")])),
+        ["changed"],
+        "an error that returns after being fixed is logged again"
+    );
+}

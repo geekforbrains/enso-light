@@ -96,6 +96,8 @@ It is supported inside agent runs and hooks. Without it, the command returns as
 soon as the job is queued; the service owns that job and it can continue after
 the calling turn ends. A job already queued or running skips scheduled
 occurrences without catch-up and rejects additional manual triggers.
+`enso jobs list` shows an invalid job with its `error`; the service skips it
+until it is fixed. Run `enso config check` after creating or editing a job.
 
 Jobs live at `$ENSO_HOME/jobs/JOB/`. A required `prompt.md` is the user request;
 `job.json` sets a required `workspace` (a name from `workspaces` in

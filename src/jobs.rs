@@ -54,7 +54,8 @@ fn enabled() -> bool {
     true
 }
 
-pub fn list(home: &Path, config: &Config) -> Result<Vec<Job>> {
+/// Every job directory by name, each with its definition or why it is invalid.
+pub fn list(home: &Path, config: &Config) -> Result<Vec<(String, Result<Job>)>> {
     let root = home.join("jobs");
     if !root.exists() {
         return Ok(vec![]);
@@ -65,27 +66,42 @@ pub fn list(home: &Path, config: &Config) -> Result<Vec<Job>> {
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("job names must be UTF-8"))?;
-        jobs.push(load(home, &name, config)?);
+        let job = match entry.file_name().into_string() {
+            Ok(name) => {
+                let job = load(home, &name, config);
+                (name, job)
+            }
+            Err(name) => {
+                let name = name.to_string_lossy().into_owned();
+                let error = anyhow::anyhow!("job {name:?}: job names must be UTF-8");
+                (name, Err(error))
+            }
+        };
+        jobs.push(job);
     }
-    jobs.sort_by(|a, b| a.name.cmp(&b.name));
+    jobs.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(jobs)
 }
 
 pub fn load(home: &Path, name: &str, config: &Config) -> Result<Job> {
     ensure!(
         config::valid_name(name),
-        "job names may contain only letters, numbers, hyphens, and underscores"
+        "job {name:?}: job names may contain only letters, numbers, hyphens, and underscores"
     );
     let directory = home.join("jobs").join(name);
     let definition: Definition = serde_json::from_str(
         &fs::read_to_string(directory.join("job.json"))
             .with_context(|| format!("job {name}: could not read job.json"))?,
     )
-    .with_context(|| format!("job {name}: invalid job.json"))?;
+    .map_err(|error| match config::safe_detail(&error) {
+        Some(detail) => anyhow::anyhow!("job {name}: invalid job.json: {detail}"),
+        None if error.is_syntax() || error.is_eof() => {
+            anyhow::anyhow!("job {name}: job.json is not valid JSON: {error}")
+        }
+        None => {
+            anyhow::anyhow!("job {name}: invalid job.json fields or value types; see docs/jobs.md")
+        }
+    })?;
     if let Some(expression) = &definition.cron {
         schedules(expression).with_context(|| format!("job {name}: invalid cron"))?;
     }
@@ -369,7 +385,61 @@ mod tests {
                 && unknown.contains("workspace \"other\" is not defined in workspaces"),
             "{unknown}"
         );
-        assert!(list(temp.path(), &defaults()).is_err());
+        let jobs = list(temp.path(), &defaults()).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].1.is_err());
+    }
+
+    #[test]
+    fn list_returns_valid_jobs_alongside_each_invalid_jobs_error() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, definition) in [
+            ("good", r#"{"workspace":"main"}"#),
+            ("bad", r#"{"workspace":"other"}"#),
+            (
+                "old",
+                r#"{"workspace":"main","execution":{"model":"opus"}}"#,
+            ),
+            (
+                "typed",
+                r#"{"workspace":"main","retries":"fake-secret-value"}"#,
+            ),
+            ("broken", r#"{"workspace":"main""#),
+            ("bad name", r#"{"workspace":"main"}"#),
+        ] {
+            let directory = temp.path().join("jobs").join(name);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("job.json"), definition).unwrap();
+            fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
+        }
+        let jobs = list(temp.path(), &defaults()).unwrap();
+        let names: Vec<_> = jobs.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["bad", "bad name", "broken", "good", "old", "typed"]);
+        assert_eq!(jobs[3].1.as_ref().unwrap().workspace, "main");
+        let error = |index: usize| format!("{:#}", jobs[index].1.as_ref().unwrap_err());
+        assert!(
+            error(0).starts_with("job bad: invalid workspace"),
+            "{}",
+            error(0)
+        );
+        assert_eq!(
+            error(1),
+            "job \"bad name\": job names may contain only letters, numbers, hyphens, and underscores"
+        );
+        assert!(
+            error(2).starts_with("job broken: job.json is not valid JSON: EOF"),
+            "{}",
+            error(2)
+        );
+        assert!(
+            error(4).contains("job old: invalid job.json: unknown field `execution`"),
+            "{}",
+            error(4)
+        );
+        assert_eq!(
+            error(5),
+            "job typed: invalid job.json fields or value types; see docs/jobs.md"
+        );
     }
 
     #[test]
@@ -387,8 +457,9 @@ mod tests {
         fs::write(directory.join("prerun.sh"), "").unwrap();
         let jobs = list(temp.path(), &defaults()).unwrap();
         assert_eq!(jobs.len(), 1);
-        assert!(jobs[0].enabled && jobs[0].prerun && !jobs[0].postrun);
-        assert_eq!(jobs[0].retries, 0);
+        let job = jobs[0].1.as_ref().unwrap();
+        assert!(job.enabled && job.prerun && !job.postrun);
+        assert_eq!(job.retries, 0);
         fs::write(
             directory.join("job.json"),
             r#"{"workspace":"main","retries":10}"#,

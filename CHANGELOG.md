@@ -53,7 +53,18 @@ Versioning and publication follow the [release flow](docs/releases.md).
   set `SLACK_USER_TOKEN` in `.env` to keep workspace search.
 - A blank or left-out `model`, `effort`, or `executable` uses the CLI's own
   default for Claude Code too; Enso no longer defaults Claude to `sonnet`/`high`.
-- `enso config check` reports the default `provider` name instead of `cli`.
+- `enso config check` reports every problem at once as `errors`, plus `notes`
+  for things to know (no routes yet, a workspace directory still to be
+  created, Codex without a git home), and counts providers, workspaces, and
+  jobs instead of reporting `cli`. It exits non-zero when there are errors, and
+  `enso service install` refuses until they are fixed. See
+  [checking configuration](https://github.com/geekforbrains/enso-light/blob/main/docs/cli.md#checking-configuration).
+- An invalid job no longer stops the service, the scheduler, or other jobs:
+  it is skipped with a logged error, and `enso jobs list` shows it with its
+  `error`. See
+  [invalid jobs](https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md#invalid-jobs).
+- A `config.json` or `job.json` with an unknown or missing field names it in
+  the error, such as ``unknown field `execution` ``.
 - **Breaking:** jobs require `workspace` in `job.json`, naming a configured
   workspace. Add `"workspace": "main"` to each existing job.
 - **Breaking:** the context header's `workspace` is an object with `name` and

@@ -60,9 +60,51 @@ It enables startup at login; `start` runs it now. Linux operation after logout
 requires your OS user's normal lingering/session configuration. Installation
 captures `HOME`, `PATH`, and native CLI configuration paths so the service can
 find the same authenticated CLI. Secrets stay in `.env` and are read at runtime;
-installation requires `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` there.
+installation requires `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` there and a
+`config check` without errors.
 Reinstall if the Enso executable or the relevant `PATH` changes. Uninstall stops
 the service and removes registration; it preserves the entire Enso home.
+
+## Checking configuration
+
+`config check` loads `config.json`, `.env`, and every job, and reports every
+problem at once instead of stopping at the first:
+
+```json
+{
+  "valid": false,
+  "errors": [
+    "providers.main.cli is blank; set \"claude\" or \"codex\"",
+    "SLACK_BOT_TOKEN is blank; set it in .env",
+    "job report: invalid workspace: workspace \"other\" is not defined in workspaces"
+  ],
+  "notes": [
+    "no dms or channels are configured; Enso will reply \"not configured\" to every message"
+  ],
+  "providers": 1,
+  "workspaces": 1,
+  "jobs": 1
+}
+```
+
+`errors` covers blank or unknown provider CLIs and names, unknown workspace and
+provider references in workspaces, routes, and jobs, relative workspace paths, a
+workspace path that is not a directory, invalid route keys and names, zero
+timeouts, blank `SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN`, and each invalid job.
+`notes` are not errors: no configured `dms` or `channels`, a workspace directory
+that `init` or service start will create, or a Codex provider while the home is
+not a git repository. With an empty `slack.unconfigured_message`, the no-routes
+note says Enso will ignore every message instead. `jobs` counts job directories,
+valid or not. A `config.json` that cannot be loaded at all is a single error.
+The report never includes token values or other substituted values. The command exits non-zero
+when there are errors, ending with an error such as
+`config check found 3 errors`. `service install` refuses to install while
+`config check` has errors.
+
+`jobs list` shows each valid job's `enabled`, `cron`, `next_run`, and
+`last_run`, and each [invalid job](jobs.md#invalid-jobs) as
+`{"name": ..., "error": ..., "last_run": ...}` without failing. `jobs run NAME`
+on an invalid job fails with that job's error.
 
 ## Messages and files
 

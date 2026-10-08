@@ -62,7 +62,11 @@ never replaces it. Enso does not commit anything.
 ```
 
 Unknown keys are errors, so a configuration from an older release fails to load
-instead of being misread.
+instead of being misread; the error names the key, as in
+``invalid config.json: unknown field `execution` ``. A wrong value type gets a
+generic error that never repeats the value, since it may come from `.env`. Run
+`enso config check` to see every other problem at once; see
+[checking configuration](cli.md#checking-configuration).
 
 ### defaults
 

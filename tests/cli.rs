@@ -34,6 +34,25 @@ fn successful(output: Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// Runs `enso config check`, returning its exit code, report, and stderr.
+fn check(home: &Path) -> (Option<i32>, Value, String) {
+    let output = enso(home, &["config", "check"]);
+    let report = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("no report: {}", String::from_utf8_lossy(&output.stderr)));
+    (
+        output.status.code(),
+        report,
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+fn has(list: &Value, message: &str) -> bool {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str().unwrap().contains(message))
+}
+
 fn configured_home() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     successful(enso(directory.path(), &["init"]));
@@ -112,6 +131,16 @@ fn upgrade_rejects_a_service_registered_to_another_executable() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("SLACK_APP_TOKEN is blank in .env"));
     fs::write(directory.path().join(".env"), dotenv).unwrap();
+    add_job(directory.path(), "broken", json!({"workspace":"other"}));
+    let output = run(&["service", "install"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("enso config check found problems")
+            && error.contains("job broken: invalid workspace"),
+        "{error}"
+    );
+    fs::remove_dir_all(directory.path().join("jobs/broken")).unwrap();
     let installed = successful(run(&["service", "install"]));
     let file = Path::new(installed["file"].as_str().unwrap());
     fs::write(file, "a service registered to another executable").unwrap();
@@ -290,14 +319,205 @@ fn config_check_validates_jobs_locally_without_exposing_credentials() {
     let valid = successful(enso(directory.path(), &["config", "check"]));
     assert_eq!(valid["valid"], true);
     assert_eq!(valid["jobs"], 1);
+    assert_eq!(valid["errors"], json!([]));
     assert!(!valid.to_string().contains("fake-bot-token"));
     fs::remove_file(directory.path().join("jobs/report/prompt.md")).unwrap();
-    let output = enso(directory.path(), &["config", "check"]);
-    assert!(!output.status.success());
-    let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("prompt.md"));
-    assert!(!error.contains("fake-bot-token"));
-    assert!(!error.contains("fake-app-token"));
+    let (code, report, stderr) = check(directory.path());
+    assert_eq!(code, Some(1));
+    assert_eq!(report["valid"], false);
+    assert!(has(&report["errors"], "job report: prompt.md is required"));
+    assert!(stderr.contains("config check found 1 error\""), "{stderr}");
+    for output in [report.to_string(), stderr] {
+        assert!(!output.contains("fake-bot-token"));
+        assert!(!output.contains("fake-app-token"));
+    }
+}
+
+#[test]
+fn config_check_reports_every_error_and_note_at_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    fs::create_dir_all(home.join("jobs")).unwrap();
+    fs::write(home.join("file"), "").unwrap();
+    fs::write(home.join(".env"), "SLACK_APP_TOKEN=fake-app-token\n").unwrap();
+    fs::write(
+        home.join("config.json"),
+        json!({
+            "defaults": {"provider": "missing", "timeout_seconds": 0},
+            "providers": {"main": {"cli": ""}, "codex": {"cli": "codex"}},
+            "workspaces": {
+                "main": {"path": "${ENSO_HOME}/workspaces/main"},
+                "file": {"path": "${ENSO_HOME}/file"},
+                "relative": {"path": "workspaces/relative", "provider": "nope"}
+            },
+            "slack": {"dms": {}, "channels": {}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    add_job(home, "bad-workspace", json!({"workspace":"other"}));
+    add_job(
+        home,
+        "bad-provider",
+        json!({"workspace":"main","provider":"opus"}),
+    );
+    add_job(home, "good", json!({"workspace":"main"}));
+    add_job(home, "bad name", json!({"workspace":"main"}));
+    let (code, report, stderr) = check(home);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert_eq!(report["valid"], false);
+    assert_eq!(
+        (&report["providers"], &report["workspaces"], &report["jobs"]),
+        (&json!(2), &json!(3), &json!(4))
+    );
+    let errors = &report["errors"];
+    for message in [
+        r#"providers.main.cli is blank; set "claude" or "codex""#,
+        "defaults.provider is not defined in providers",
+        "defaults.timeout_seconds must be greater than zero",
+        "workspaces.relative.path must be absolute",
+        "workspaces.relative.provider is not defined in providers",
+        "workspaces.file.path exists but is not a directory",
+        "SLACK_BOT_TOKEN is blank",
+        "job bad-provider: invalid provider",
+        "job bad-workspace: invalid workspace",
+        r#"job "bad name": job names may contain only"#,
+    ] {
+        assert!(has(errors, message), "{message}: {errors:#}");
+    }
+    assert_eq!(errors.as_array().unwrap().len(), 10, "{errors:#}");
+    assert!(stderr.contains("config check found 10 errors"), "{stderr}");
+    let notes = &report["notes"];
+    for message in [
+        r#"no dms or channels are configured; Enso will reply "not configured" to every message"#,
+        "workspaces.main.path does not exist yet; it will be created on init or service start",
+        "Codex will not load the shared AGENTS.md",
+    ] {
+        assert!(has(notes, message), "{message}: {notes:#}");
+    }
+    assert_eq!(notes.as_array().unwrap().len(), 3, "{notes:#}");
+    assert!(!report.to_string().contains(&home.display().to_string()));
+}
+
+#[test]
+fn config_check_passes_with_notes() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    successful(enso(home, &["init"]));
+    fs::write(
+        home.join(".env"),
+        "SLACK_BOT_TOKEN=fake-bot-token\nSLACK_APP_TOKEN=fake-app-token\n",
+    )
+    .unwrap();
+    fs::write(
+        home.join("config.json"),
+        json!({
+            "defaults": {"provider": "main"},
+            "providers": {"main": {"cli": "claude"}},
+            "workspaces": {
+                "main": {"path": "${ENSO_HOME}/workspaces/main"},
+                "later": {"path": "${ENSO_HOME}/workspaces/later"}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let report = successful(enso(home, &["config", "check"]));
+    assert_eq!(report["valid"], true);
+    assert_eq!(report["errors"], json!([]));
+    assert_eq!(
+        report["notes"],
+        json!([
+            r#"no dms or channels are configured; Enso will reply "not configured" to every message"#,
+            "workspaces.later.path does not exist yet; it will be created on init or service start"
+        ])
+    );
+    fs::write(
+        home.join("config.json"),
+        json!({
+            "defaults": {"provider": "main"},
+            "providers": {"main": {"cli": "claude"}},
+            "workspaces": {"main": {"path": "${ENSO_HOME}/workspaces/main"}},
+            "slack": {"unconfigured_message": ""}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let report = successful(enso(home, &["config", "check"]));
+    assert_eq!(
+        report["notes"],
+        json!(["no dms or channels are configured; Enso will ignore every message"])
+    );
+}
+
+#[test]
+fn config_check_never_echoes_substituted_values() {
+    let directory = configured_home();
+    let home = directory.path();
+    fs::write(
+        home.join(".env"),
+        "SLACK_BOT_TOKEN=fake-bot-token\nSLACK_APP_TOKEN=fake-app-token\nOTHER_SECRET=fake-other-secret\n",
+    )
+    .unwrap();
+    fs::write(
+        home.join("config.json"),
+        json!({
+            "defaults": {"provider": "${SLACK_BOT_TOKEN}"},
+            "providers": {"main": {"cli": "claude"}},
+            "workspaces": {"main": {"path": "${ENSO_HOME}/workspaces/main", "provider": "${OTHER_SECRET}"}},
+            "slack": {"dms": {"*": "${SLACK_APP_TOKEN}"}, "channels": {"*": "${OTHER_SECRET}"}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code, report, stderr) = check(home);
+    assert_eq!(code, Some(1));
+    assert_eq!(
+        report["errors"],
+        json!([
+            "defaults.provider is not defined in providers",
+            "workspaces.main.provider is not defined in providers",
+            "slack.dms.* names a workspace that is not defined in workspaces",
+            "slack.channels.* names a workspace that is not defined in workspaces"
+        ])
+    );
+    for output in [report.to_string(), stderr] {
+        for secret in ["fake-bot-token", "fake-app-token", "fake-other-secret"] {
+            assert!(!output.contains(secret), "{output}");
+        }
+    }
+}
+
+#[test]
+fn config_check_reports_one_safe_error_when_config_json_cannot_load() {
+    let directory = configured_home();
+    let home = directory.path();
+    let path = home.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["execution"] = json!({"cli": "claude"});
+    config["providers"]["main"]["cli"] = json!("");
+    fs::write(&path, config.to_string()).unwrap();
+    let (code, report, _) = check(home);
+    assert_eq!(code, Some(1));
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report:#}");
+    assert!(
+        has(
+            &report["errors"],
+            "invalid config.json: unknown field `execution`"
+        ),
+        "{report:#}"
+    );
+    config.as_object_mut().unwrap().remove("execution");
+    config["defaults"]["timeout_seconds"] = json!("${SLACK_BOT_TOKEN}");
+    fs::write(&path, config.to_string()).unwrap();
+    let (code, report, stderr) = check(home);
+    assert_eq!(code, Some(1));
+    assert_eq!(
+        report["errors"],
+        json!(["invalid config.json fields or value types; see docs/configuration.md"])
+    );
+    assert!(!report.to_string().contains("fake-bot-token"));
+    assert!(!stderr.contains("fake-bot-token"));
 }
 
 #[test]
@@ -307,10 +527,15 @@ fn config_check_requires_a_provider_cli_known_job_providers_and_env_tokens() {
     let dotenv = fs::read_to_string(starter.path().join(".env")).unwrap();
     assert!(dotenv.contains("SLACK_BOT_TOKEN=\nSLACK_APP_TOKEN=\n"));
     assert!(dotenv.contains("\nSLACK_USER_TOKEN=\n"));
-    let error = String::from_utf8(enso(starter.path(), &["config", "check"]).stderr).unwrap();
-    assert!(
-        error.contains(r#"providers.main.cli is blank; set \"claude\" or \"codex\""#),
-        "{error}"
+    let (code, report, _) = check(starter.path());
+    assert_eq!(code, Some(1));
+    assert_eq!(
+        report["errors"],
+        json!([
+            r#"providers.main.cli is blank; set "claude" or "codex""#,
+            "SLACK_BOT_TOKEN is blank; set it in .env",
+            "SLACK_APP_TOKEN is blank; set it in .env"
+        ])
     );
 
     let directory = configured_home();
@@ -320,21 +545,25 @@ fn config_check_requires_a_provider_cli_known_job_providers_and_env_tokens() {
         json!({"workspace":"main","provider":"opus"}),
     );
     let valid = successful(enso(directory.path(), &["config", "check"]));
-    assert_eq!(valid["provider"], "main");
+    assert_eq!(valid["providers"], 2);
     for (definition, message) in [
         (
             json!({"workspace":"main","provider":"missing"}),
             "job report: invalid provider",
         ),
-        (json!({}), "missing field `workspace`"),
+        (
+            json!({}),
+            "job report: invalid job.json: missing field `workspace`",
+        ),
         (
             json!({"workspace":"other"}),
-            r#"workspace \"other\" is not defined in workspaces"#,
+            r#"workspace "other" is not defined in workspaces"#,
         ),
     ] {
         add_job(directory.path(), "report", definition);
-        let error = String::from_utf8(enso(directory.path(), &["config", "check"]).stderr).unwrap();
-        assert!(error.contains(message), "{error}");
+        let (code, report, _) = check(directory.path());
+        assert_eq!(code, Some(1));
+        assert!(has(&report["errors"], message), "{report:#}");
     }
     add_job(directory.path(), "report", json!({"workspace":"main"}));
     fs::write(
@@ -354,9 +583,12 @@ fn config_check_requires_a_provider_cli_known_job_providers_and_env_tokens() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let output = enso(directory.path(), &["config", "check"]);
-    let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("SLACK_BOT_TOKEN is blank"), "{error}");
+    let (code, report, _) = check(directory.path());
+    assert_eq!(code, Some(1));
+    assert_eq!(
+        report["errors"],
+        json!(["SLACK_BOT_TOKEN is blank; set it in .env"])
+    );
 }
 
 #[test]
@@ -372,13 +604,24 @@ fn jobs_list_reports_definitions_and_trigger_requires_a_running_service() {
         "manual",
         json!({"workspace":"main","enabled":false}),
     );
+    add_job(directory.path(), "broken", json!({"workspace":"other"}));
     let list = successful(enso(directory.path(), &["jobs", "list"]));
-    assert_eq!(list.as_array().unwrap().len(), 2);
-    assert_eq!(list[0]["name"], "manual");
-    assert_eq!(list[0]["enabled"], false);
-    assert_eq!(list[0]["next_run"], Value::Null);
-    assert_eq!(list[1]["name"], "report");
-    assert!(list[1]["next_run"].is_string());
+    assert_eq!(list.as_array().unwrap().len(), 3);
+    assert_eq!(list[0]["name"], "broken");
+    assert!(
+        list[0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("job broken: invalid workspace"),
+        "{list:#}"
+    );
+    assert_eq!(list[0].get("enabled"), None);
+    assert_eq!(list[1]["name"], "manual");
+    assert_eq!(list[1]["enabled"], false);
+    assert_eq!(list[1]["next_run"], Value::Null);
+    assert_eq!(list[1].get("error"), None);
+    assert_eq!(list[2]["name"], "report");
+    assert!(list[2]["next_run"].is_string());
     let stopped = enso(directory.path(), &["jobs", "run", "report"]);
     assert!(!stopped.status.success());
     assert!(String::from_utf8_lossy(&stopped.stderr).contains("not running"));
@@ -392,6 +635,14 @@ fn jobs_list_reports_definitions_and_trigger_requires_a_running_service() {
     // Holding the daemon lock simulates liveness without launching any network
     // service. The command must only enqueue, never execute a native CLI itself.
     let _lock = app::lock(directory.path()).unwrap();
+    let broken = enso(directory.path(), &["jobs", "run", "broken"]);
+    assert!(!broken.status.success());
+    let error = String::from_utf8_lossy(&broken.stderr);
+    assert!(
+        error.contains("job broken: invalid workspace")
+            && error.contains(r#"workspace \"other\" is not defined"#),
+        "{error}"
+    );
     let receipt = successful(enso(directory.path(), &["jobs", "run", "manual"]));
     assert_eq!(receipt["state"], "queued");
     let db = Db::open(directory.path()).unwrap();
@@ -475,28 +726,27 @@ fn config_check_rejects_old_routing_keys_and_unknown_workspace_routes() {
     for (slack, message) in [
         (
             json!({"dm_users":["U012345"]}),
-            "invalid config.json fields",
+            "invalid config.json: unknown field `dm_users`",
         ),
         (
             json!({"channels":{"C012345":{"top_level":true,"thread":false}}}),
-            "invalid config.json fields",
+            "invalid config.json: unknown field `thread`, expected `workspace` or `mention`",
         ),
         (
             json!({"channels":{"C012345":"other"}}),
-            "slack.channels.C012345 names workspace",
-        ),
-        (
-            json!({"channels":{"C012345":{"workspace":"main","mention":"first"}},"dms":{"*":"main"}}),
-            "",
+            "slack.channels.C012345 names a workspace that is not defined",
         ),
     ] {
         config["slack"] = slack;
         fs::write(&path, config.to_string()).unwrap();
-        let output = enso(directory.path(), &["config", "check"]);
-        let error = String::from_utf8(output.stderr).unwrap();
-        assert_eq!(output.status.success(), message.is_empty(), "{error}");
-        assert!(error.contains(message), "{error}");
+        let (code, report, _) = check(directory.path());
+        assert_eq!(code, Some(1));
+        assert!(has(&report["errors"], message), "{report:#}");
     }
+    config["slack"] =
+        json!({"channels":{"C012345":{"workspace":"main","mention":"first"}},"dms":{"*":"main"}});
+    fs::write(&path, config.to_string()).unwrap();
+    successful(enso(directory.path(), &["config", "check"]));
 }
 
 #[test]
