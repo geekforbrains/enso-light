@@ -28,9 +28,7 @@ fn optional<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>
 impl Provider {
     fn problems(&self, name: &str, errors: &mut Vec<String>) {
         if self.cli.trim().is_empty() {
-            errors.push(format!(
-                "providers.{name}.cli is blank; set \"claude\" or \"codex\""
-            ));
+            errors.push(blank_cli(name));
         } else if !matches!(self.cli.as_str(), "claude" | "codex") {
             errors.push(format!(
                 "providers.{name}.cli must be \"claude\" or \"codex\""
@@ -44,7 +42,7 @@ impl Provider {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
     pub provider: String,
@@ -55,8 +53,7 @@ pub struct Defaults {
 }
 
 /// When channel messages must @mention the bot; DMs never need mentions.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mention {
     /// At top level and in threads.
     #[default]
@@ -65,10 +62,24 @@ pub enum Mention {
     First,
     /// Never at top level; thread replies need one until the bot joins.
     Never,
+    /// An unrecognized mode, kept so `config check` reports it with the
+    /// other problems; validation rejects it before any routing.
+    Invalid,
+}
+
+impl<'de> Deserialize<'de> for Mention {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(deserializer)?.as_str() {
+            "always" => Self::Always,
+            "first" => Self::First,
+            "never" => Self::Never,
+            _ => Self::Invalid,
+        })
+    }
 }
 
 /// A named working directory, optionally with its own provider.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     pub path: PathBuf,
@@ -91,13 +102,8 @@ pub struct Destination {
 impl Destination {
     /// Requires a Slack conversation ID and, for a thread, its root message timestamp.
     pub fn validate(&self) -> Result<()> {
-        let id = self.channel.as_bytes();
         ensure!(
-            id.len() > 1
-                && matches!(id[0], b'C' | b'D' | b'G')
-                && id
-                    .iter()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()),
+            slack_id(&self.channel, b"CDG"),
             "channel must be a Slack channel or DM ID such as C012345 or D012345, not {:?}",
             self.channel
         );
@@ -119,8 +125,7 @@ impl Destination {
 }
 
 /// A channel's workspace name, or its workspace and mention mode.
-#[derive(Clone, Debug, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug)]
 pub enum ChannelRoute {
     Workspace(String),
     Settings(ChannelSettings),
@@ -151,7 +156,7 @@ impl<'de> Deserialize<'de> for ChannelRoute {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelSettings {
     pub workspace: String,
@@ -175,7 +180,7 @@ impl ChannelRoute {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
     /// Slack user ID or `*` to workspace name.
@@ -202,14 +207,18 @@ impl Default for SlackConfig {
     }
 }
 
-/// `*` or an ID made of one of `prefixes` and uppercase letters or digits.
+/// One of `prefixes` followed by uppercase letters or digits.
+fn slack_id(id: &str, prefixes: &[u8]) -> bool {
+    id.len() > 1
+        && prefixes.contains(&id.as_bytes()[0])
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// `*` or a Slack ID with one of `prefixes`.
 fn route_key(key: &str, prefixes: &[u8]) -> bool {
-    key == "*"
-        || key.len() > 1
-            && prefixes.contains(&key.as_bytes()[0])
-            && key
-                .bytes()
-                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    key == "*" || slack_id(key, prefixes)
 }
 
 /// Letters, digits, hyphens, and underscores, as for job names.
@@ -220,7 +229,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub defaults: Defaults,
@@ -239,12 +248,13 @@ fn fail(problems: Vec<String>) -> Result<()> {
 }
 
 impl Config {
+    #[cfg(test)]
     pub fn validate(&self) -> Result<()> {
         fail(self.problems())
     }
 
     /// Every problem in the configuration itself, without inspecting the filesystem.
-    pub fn problems(&self) -> Vec<String> {
+    fn problems(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.providers.is_empty() {
             errors.push("providers must define at least one provider".into());
@@ -256,6 +266,10 @@ impl Config {
             errors.push("defaults.provider is blank; name one of providers".into());
         } else if !self.providers.contains_key(&self.defaults.provider) {
             errors.push("defaults.provider is not defined in providers".into());
+        }
+        const MENTION: &str = "must be \"always\", \"first\", or \"never\"";
+        if self.defaults.mention == Mention::Invalid {
+            errors.push(format!("defaults.mention {MENTION}"));
         }
         if self.defaults.timeout_seconds == 0 {
             errors.push("defaults.timeout_seconds must be greater than zero".into());
@@ -305,6 +319,9 @@ impl Config {
                     "slack.channels.{key} names a workspace that is not defined in workspaces"
                 ));
             }
+            if route.mention() == Some(Mention::Invalid) {
+                errors.push(format!("slack.channels.{key}.mention {MENTION}"));
+            }
         }
         if self.slack.working_reaction.is_empty() {
             errors.push("slack.working_reaction must not be empty".into());
@@ -339,24 +356,36 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    pub fn validate(&self) -> Result<()> {
-        fail(self.problems())
-    }
-
-    pub fn problems(&self) -> Vec<String> {
+    fn problems(&self) -> Vec<String> {
         [
             ("SLACK_BOT_TOKEN", &self.bot),
             ("SLACK_APP_TOKEN", &self.app),
         ]
         .into_iter()
         .filter(|(_, value)| value.trim().is_empty())
-        .map(|(name, _)| format!("{name} is blank; set it in .env"))
+        .map(|(name, _)| blank_token(name))
         .collect()
     }
 
     pub fn secrets(&self) -> impl Iterator<Item = &String> {
         [&self.bot, &self.app].into_iter().chain(self.user.iter())
     }
+}
+
+fn blank_cli(provider: &str) -> String {
+    format!("providers.{provider}.cli is blank; set \"claude\" or \"codex\"")
+}
+
+fn blank_token(name: &str) -> String {
+    format!("{name} is blank; set it in .env")
+}
+
+/// Whether an error is one of the blanks `enso init` leaves for the user to fill in.
+pub fn is_starter_blank(error: &str) -> bool {
+    error == blank_cli("main")
+        || ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]
+            .into_iter()
+            .any(|name| error == blank_token(name))
 }
 
 #[derive(Clone, Debug)]
@@ -372,7 +401,7 @@ impl Loaded {
         fail(self.problems())
     }
 
-    pub fn problems(&self) -> Vec<String> {
+    fn problems(&self) -> Vec<String> {
         let mut errors = self.config.problems();
         errors.extend(self.tokens.problems());
         errors
@@ -394,7 +423,10 @@ pub struct Check {
 pub fn check(home: &Path) -> Check {
     let mut check = Check::default();
     match load(home) {
-        Err(error) => check.errors.push(format!("{error:#}")),
+        Err(error) => {
+            check.errors.push(format!("{error:#}"));
+            check.jobs = crate::jobs::count(home);
+        }
         Ok(loaded) => {
             let config = &loaded.config;
             check.errors = loaded.problems();
@@ -407,22 +439,12 @@ pub fn check(home: &Path) -> Check {
                     "no dms or channels are configured; Enso will reply \"not configured\" to every message".into()
                 });
             }
-            for (name, workspace) in &config.workspaces {
-                if !workspace.path.is_absolute() {
-                    continue;
-                }
-                match fs::metadata(&workspace.path) {
-                    Ok(metadata) if metadata.is_dir() => {}
-                    Ok(_) => check.errors.push(format!(
-                        "workspaces.{name}.path exists but is not a directory"
-                    )),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        check.notes.push(format!("workspaces.{name}.path does not exist yet; it will be created on init or service start"))
-                    }
-                    Err(error) => check.errors.push(format!(
-                        "workspaces.{name}.path cannot be inspected: {}",
-                        error.kind()
-                    )),
+            // An invalid name is already an error; don't also promise to create it.
+            for (name, workspace) in config.workspaces.iter().filter(|(n, _)| valid_name(n)) {
+                match missing_workspace(name, &workspace.path) {
+                    Ok(false) => {}
+                    Ok(true) => check.notes.push(format!("workspaces.{name}.path does not exist yet; it will be created on init or service start")),
+                    Err(error) => check.errors.push(format!("{error:#}")),
                 }
             }
             if config.providers.values().any(|p| p.cli == "codex")
@@ -442,6 +464,9 @@ pub fn check(home: &Path) -> Check {
             }
         }
     }
+    if let Err(error) = crate::db::Db::check(home) {
+        check.errors.push(format!("{error:#}"));
+    }
     check.valid = check.errors.is_empty();
     check
 }
@@ -457,7 +482,7 @@ pub fn load(home: &Path) -> Result<Loaded> {
 }
 
 /// `.env` overrides the inherited environment; `ENSO_HOME` is always the home in use.
-fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loaded> {
+pub fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loaded> {
     let env = read_dotenv(home)?;
     variables.extend(env.clone());
     let token = |name: &str| variables.get(name).cloned().unwrap_or_default();
@@ -473,7 +498,7 @@ fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loa
         serde_json::from_slice(&config).context("invalid Enso config.json")?;
     expand_value(&mut value, &variables)?;
     // Avoid serde's invalid-value diagnostics echoing a substituted credential.
-    let config: Config =
+    let mut config: Config =
         serde_json::from_value(value).map_err(|error| match safe_detail(&error) {
             Some(detail) => {
                 anyhow::anyhow!("invalid config.json: {detail}; see docs/configuration.md")
@@ -484,6 +509,10 @@ fn load_with(home: &Path, mut variables: BTreeMap<String, String>) -> Result<Loa
                 )
             }
         })?;
+    // One spelling per directory, so session pins and dedup agree on equal paths.
+    for workspace in config.workspaces.values_mut() {
+        workspace.path = workspace.path.components().collect();
+    }
     Ok(Loaded {
         config,
         env,
@@ -644,25 +673,33 @@ pub fn git_init(home: &Path) -> Option<String> {
     ))
 }
 
+/// Whether an absolute workspace path still has to be created; an error when it
+/// cannot be used. A relative path is a validation error reported elsewhere.
+fn missing_workspace(name: &str, path: &Path) -> Result<bool> {
+    if !path.is_absolute() {
+        return Ok(false);
+    }
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(false),
+        Ok(_) => bail!("workspaces.{name}.path exists but is not a directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => bail!(
+            "workspaces.{name}.path cannot be inspected: {}",
+            error.kind()
+        ),
+    }
+}
+
 /// Creates each configured workspace whose directory does not exist, with starter
 /// instructions and skill links. Existing directories are never modified.
-pub fn scaffold(config: &Config) -> Result<Vec<PathBuf>> {
-    let mut missing = Vec::new();
+/// Returns the created paths and one error per workspace that could not be created.
+pub fn scaffold(config: &Config) -> (Vec<PathBuf>, Vec<String>) {
+    let (mut missing, mut errors) = (Vec::new(), Vec::new());
     for (name, workspace) in &config.workspaces {
-        let path = &workspace.path;
-        if !path.is_absolute() {
-            continue;
-        }
-        match fs::metadata(path) {
-            Ok(metadata) if metadata.is_dir() => continue,
-            Ok(_) => bail!(
-                "workspaces.{name}.path exists but is not a directory: {}",
-                path.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push((path, name))
-            }
-            Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+        match missing_workspace(name, &workspace.path) {
+            Ok(true) => missing.push((&workspace.path, name)),
+            Ok(false) => {}
+            Err(error) => errors.push(format!("{error:#}")),
         }
     }
     // Parents first, so a nested workspace never leaves its parent unscaffolded.
@@ -670,17 +707,22 @@ pub fn scaffold(config: &Config) -> Result<Vec<PathBuf>> {
     missing.dedup_by_key(|(path, _)| *path);
     let mut created = Vec::new();
     for (path, name) in missing {
-        for dir in ["", ".agents", ".agents/skills", ".claude"] {
-            create_dir(&path.join(dir))?;
+        let result = (|| {
+            for dir in ["", ".agents", ".agents/skills", ".claude"] {
+                create_dir(&path.join(dir))?;
+            }
+            create_file(
+                &path.join("AGENTS.md"),
+                &include_str!("../bundled/WORKSPACE.md").replace("{{name}}", name),
+            )?;
+            link_guidance(path)
+        })();
+        match result {
+            Ok(()) => created.push(path.clone()),
+            Err(error) => errors.push(format!("workspaces.{name}: {error:#}")),
         }
-        create_file(
-            &path.join("AGENTS.md"),
-            &include_str!("../bundled/WORKSPACE.md").replace("{{name}}", name),
-        )?;
-        link_guidance(path)?;
-        created.push(path.clone());
     }
-    Ok(created)
+    (created, errors)
 }
 
 fn create_file(path: &Path, content: &str) -> Result<()> {
@@ -822,7 +864,10 @@ mod tests {
         .unwrap();
         let config = load_with(&home, BTreeMap::new()).unwrap().config;
         let main = home.join("workspaces/main");
-        assert_eq!(scaffold(&config).unwrap(), [main.clone(), outside.clone()]);
+        assert_eq!(
+            scaffold(&config),
+            (vec![main.clone(), outside.clone()], vec![])
+        );
         for (name, path) in [("main", &main), ("acme", &outside)] {
             for dir in ["", ".agents", ".agents/skills", ".claude"] {
                 assert_eq!(mode(&path.join(dir)), 0o700, "{name} {dir}");
@@ -845,7 +890,7 @@ mod tests {
         );
         fs::write(main.join("AGENTS.md"), "custom").unwrap();
         fs::remove_file(main.join("CLAUDE.md")).unwrap();
-        assert!(scaffold(&config).unwrap().is_empty());
+        assert_eq!(scaffold(&config), (vec![], vec![]));
         assert_eq!(
             fs::read_to_string(main.join("AGENTS.md")).unwrap(),
             "custom"
@@ -863,8 +908,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            scaffold(&config).unwrap(),
-            [team.clone(), team.join("inner")]
+            scaffold(&config),
+            (vec![team.clone(), team.join("inner")], vec![])
         );
         for (name, path) in [("b", team.clone()), ("a", team.join("inner"))] {
             assert_guidance_links(&path);
@@ -877,21 +922,62 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_rejects_a_workspace_path_that_is_a_file() {
+    fn scaffold_reports_an_unusable_workspace_and_creates_the_others() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("file");
         fs::write(&file, "not a directory").unwrap();
+        let locked = temp.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        let good = temp.path().join("good");
         let config: Config = serde_json::from_value(json!({
             "defaults": {"provider": "main"},
-            "workspaces": {"main": {"path": file}}
+            "workspaces": {
+                "file": {"path": file},
+                "good": {"path": good},
+                "locked": {"path": locked.join("acme")}
+            }
         }))
         .unwrap();
-        let error = scaffold(&config).unwrap_err().to_string();
+        let (created, errors) = scaffold(&config);
+        assert_eq!(created, [good.as_path()]);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(
+            errors[0],
+            "workspaces.file.path exists but is not a directory"
+        );
         assert!(
-            error.contains("workspaces.main.path exists but is not a directory"),
-            "{error}"
+            errors[1].starts_with("workspaces.locked: create "),
+            "{errors:?}"
         );
         assert_eq!(fs::read_to_string(file).unwrap(), "not a directory");
+        assert_guidance_links(&good);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn workspace_paths_are_normalized_once_at_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::write(
+            home.join("config.json"),
+            r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}},"workspaces":{"a":{"path":"/x//acme/"},"b":{"path":"/x/./acme"},"main":{"path":"${ENSO_HOME}/workspaces/main"}}}"#,
+        )
+        .unwrap();
+        let home_slash = PathBuf::from(format!("{}/", home.display()));
+        let config = load_with(&home_slash, BTreeMap::new()).unwrap().config;
+        for name in ["a", "b"] {
+            assert_eq!(
+                config.workspaces[name].path.to_string_lossy(),
+                "/x/acme",
+                "{name}"
+            );
+        }
+        assert_eq!(
+            config.workspaces["main"].path.to_string_lossy(),
+            home.join("workspaces/main").to_string_lossy()
+        );
     }
 
     const VALID: &str = r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"}},"workspaces":{"main":{"path":"${ENSO_HOME}/workspaces/main"}}}"#;
@@ -1250,7 +1336,7 @@ mod tests {
                 "invalid config.json: unknown field `thread`, expected `workspace` or `mention`",
             ),
             (
-                r#"{"channels":{"C1":{"workspace":"main","mention":"sometimes"}}}"#,
+                r#"{"channels":{"C1":{"workspace":"main","mention":1}}}"#,
                 "invalid config.json fields",
             ),
             (
@@ -1262,11 +1348,29 @@ mod tests {
             let error = format!("{:#}", routed(main, slack).unwrap_err());
             assert!(error.contains(message), "{slack}: {error}");
         }
+        // An unknown mode is a validation problem that never repeats the value.
+        let error = format!(
+            "{:#}",
+            routed(
+                main,
+                r#"{"channels":{"C1":{"workspace":"main","mention":"sometimes"}}}"#
+            )
+            .unwrap_err()
+        );
+        assert_eq!(
+            error,
+            r#"slack.channels.C1.mention must be "always", "first", or "never""#
+        );
         let (_temp, loaded) = load_config(
             r#"{"defaults":{"provider":"main","mention":"top_level"},"providers":{"main":{"cli":"claude"}}}"#,
             "",
             &[],
         );
-        assert!(loaded.is_err());
+        let error = loaded.unwrap().config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains(r#"defaults.mention must be "always", "first", or "never""#)
+                && !error.contains("top_level"),
+            "{error}"
+        );
     }
 }

@@ -2,7 +2,9 @@
 use crate::{config::Destination, slack::Incoming};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -93,28 +95,47 @@ fn queue(
     Ok(ids)
 }
 
+/// Whether the database has no schema yet; any schema but version 2 is an error.
+fn empty(c: &Connection) -> Result<bool> {
+    let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let count: i64 = c.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version == 0 && count == 0 {
+        return Ok(true);
+    }
+    ensure!(
+        version == 2,
+        "enso.db uses schema {version}; Enso 0.2.0 needs a new database. Move enso.db and its -wal/-shm files aside (see the 0.2.0 changelog)."
+    );
+    Ok(false)
+}
+
 impl Db {
     pub fn open(home: &Path) -> Result<Self> {
         let db = Self {
             path: home.join("enso.db"),
         };
         let c = db.connect()?;
-        let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        let count: i64 = c.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-            [],
-            |r| r.get(0),
-        )?;
-        if version == 0 && count == 0 {
+        if empty(&c)? {
             c.execute_batch(include_str!("schema.sql"))?;
-        } else {
-            ensure!(
-                version == 2,
-                "enso.db uses schema {version}; Enso 0.2.0 needs a new database. Move enso.db and its -wal/-shm files aside (see the 0.2.0 changelog)."
-            );
         }
         fs::set_permissions(&db.path, fs::Permissions::from_mode(0o600))?;
         Ok(db)
+    }
+
+    /// Checks an existing enso.db's schema read-only, creating nothing.
+    pub fn check(home: &Path) -> Result<()> {
+        let path = home.join("enso.db");
+        if !path.exists() {
+            return Ok(());
+        }
+        let c = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .context("cannot read enso.db")?;
+        c.busy_timeout(Duration::from_secs(5))?;
+        empty(&c).map(drop)
     }
     fn connect(&self) -> Result<Connection> {
         let c = Connection::open(&self.path)?;
@@ -394,15 +415,14 @@ impl Db {
         text: &str,
         reply: &Destination,
         payloads: Vec<Value>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if tx.execute("INSERT OR IGNORE INTO messages(id,direction,channel,thread,slack_ts,event_key,body,payload,state,created_at) VALUES(?1,'in',?2,?3,?4,?5,?6,'{}','ignored',?7)",params![id(),channel,thread.unwrap_or(""),ts,event_key(channel,ts),text,now()])? == 0 {
-            return Ok(false);
+        if tx.execute("INSERT OR IGNORE INTO messages(id,direction,channel,thread,slack_ts,event_key,body,payload,state,created_at) VALUES(?1,'in',?2,?3,?4,?5,?6,'{}','ignored',?7)",params![id(),channel,thread.unwrap_or(""),ts,event_key(channel,ts),text,now()])? == 1 {
+            queue(&tx, reply, payloads, &[], None, false)?;
+            tx.commit()?;
         }
-        queue(&tx, reply, payloads, &[], None, false)?;
-        tx.commit()?;
-        Ok(true)
+        Ok(())
     }
     pub fn claim_delivery(&self) -> Result<Option<Delivery>> {
         let mut c = self.connect()?;

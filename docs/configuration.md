@@ -63,9 +63,11 @@ never replaces it. Enso does not commit anything.
 
 Unknown keys are errors, so a configuration from an older release fails to load
 instead of being misread; the error names the key, as in
-``invalid config.json: unknown field `execution` ``. A wrong value type gets a
-generic error that never repeats the value, since it may come from `.env`. Run
-`enso config check` to see every other problem at once; see
+``invalid config.json: unknown field `execution` ``. A wrong value type, such
+as a number where a string belongs, gets a generic error that never repeats the
+value, since it may come from `.env`. Either error stops loading, so fix it
+first; once `config.json` loads, `enso config check` shows every other problem,
+including an unknown `mention` mode, at once. See
 [checking configuration](cli.md#checking-configuration).
 
 ### defaults
@@ -139,9 +141,11 @@ permissions and a starter layout:
 
 An existing directory, such as a project repository, is used as it is: Enso adds
 no files or links, only `uploads/<run-id>/` when a message has attachments. A
-path that exists but is not a directory is an error. A directory removed while
-the service runs makes its runs fail until it is recreated or the service
-restarts.
+path that exists but is not a directory is an error. If service startup cannot
+create a workspace, for example on an unmounted volume, it logs the error and
+keeps running; that workspace's runs fail until its directory exists. A
+directory removed while the service runs makes its runs fail until it is
+recreated or the service restarts.
 
 ### Instructions and skills
 
@@ -171,6 +175,12 @@ home, Codex loads its `.agents/skills/` only when the workspace is a git
 repository or is trusted in your Codex configuration. Codex always also loads
 `~/.agents/skills` and `~/.codex/AGENTS.md`; Enso cannot isolate Codex runs
 from them.
+
+For the same reason, a workspace inside the home that is its own git
+repository, such as a project cloned into `~/.enso/workspaces/acme`, is its own
+root for Codex and does not get the shared layer, including the bundled `enso`
+skill. Treat it like an outside workspace: copy or link the shared files it
+needs, or keep repositories outside the home.
 
 ### slack
 
@@ -258,13 +268,18 @@ Slack tokens come only from the environment, never from `config.json`.
 `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` are required; an empty
 `SLACK_USER_TOKEN` counts as unset. Enso keeps all three out of logs and error
 messages. Direct commands such as `enso slack` also accept tokens from the
-inherited environment, but the installed service reads them only from `.env`,
-so `enso service install` requires both required tokens there.
+inherited environment, but only when `.env` does not assign them: any
+assignment in `.env`, even the empty `SLACK_BOT_TOKEN=` line `enso init`
+writes, overrides an exported value, so delete those lines to use exported
+tokens. The installed service reads tokens only from `.env`, so
+`enso service install` requires both required tokens there.
 
 Enso loads `.env` for agent CLIs and hooks, overriding inherited values of the
 same name. `${NAME}` in configuration string values uses this combined
 environment, plus `${ENSO_HOME}`: the Enso home in use, which `.env` and the
-inherited environment cannot override. Substitution happens once, with no shell
+inherited environment cannot override. The installed service inherits only
+`HOME`, `PATH`, and a few CLI variables, so define anything else that
+`config.json` uses in `.env`; `enso service install` checks this. Substitution happens once, with no shell
 evaluation; missing variables are errors. Quote literal values in `.env` using
 standard dotenv syntax. Never put credentials in prompts, starter guidance, or
 source control.
@@ -296,10 +311,10 @@ scopes, and their events. Enso does not use other scopes such as
 `chat:write.public`, `im:write`, or `users:read.email`.
 
 Only one service should consume the same Socket Mode app token. Enso records
-each Slack message's channel and timestamp, so duplicate deliveries (including a
-mention sent as both `message` and `app_mention`) are handled once. Use `enso service status` to
-check both the service and Slack connection; process startup alone is not a
-successful Slack connection.
+each Slack message's channel and timestamp, so duplicate deliveries (including
+a mention sent as both `message` and `app_mention`) are handled once. Use
+`enso service status` to check both the service and Slack connection; process
+startup alone is not a successful Slack connection.
 
 The [Slack CLI commands](cli.md#slack-lookup-and-reactions) use the bot token for
 channel/user lookup, history, threads, links, and reactions, so they need the

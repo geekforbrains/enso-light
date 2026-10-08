@@ -157,9 +157,18 @@ async fn execute(cli: Cli) -> Result<()> {
             Db::open(&home)?;
             let warnings: Vec<String> = config::git_init(&home).into_iter().collect();
             // Scaffolding needs parsed workspace paths, not a valid provider yet.
-            let workspaces = config::scaffold(&config::load(&home)?.config)?;
+            let (workspaces, errors) = config::scaffold(&config::load(&home)?.config);
+            ensure!(errors.is_empty(), "{}", errors.join("; "));
+            let check = config::check(&home);
+            let next = if check.valid {
+                "Install and start the service with enso service install and enso service start, or run enso service restart if it is installed."
+            } else if check.errors.iter().all(|e| config::is_starter_blank(e)) {
+                "Set providers.main.cli and the Slack tokens in .env, then run enso config check."
+            } else {
+                "Run enso config check and fix the errors it reports."
+            };
             print(
-                &json!({"initialized":home,"workspaces_created":workspaces,"warnings":warnings,"next":"Set providers.main.cli and the Slack tokens in .env, then run enso config check."}),
+                &json!({"initialized":home,"workspaces_created":workspaces,"warnings":warnings,"next":next}),
                 cli.json,
             );
         }
@@ -170,7 +179,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::Slack { command } => {
             let loaded = config::load(&home)?;
-            let slack = Slack::new(&loaded.config.slack, &loaded.tokens)?;
+            let slack = Slack::new(&loaded.tokens)?;
             print(&slack_cli::execute(command, slack).await?, cli.json);
         }
         Command::Config {

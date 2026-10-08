@@ -78,17 +78,6 @@ pub fn install(home: &Path) -> Result<Value> {
         "enso config check found problems; fix them before installing: {}",
         check.errors.join("; ")
     );
-    let loaded = crate::config::load(home)?;
-    // The service unit does not inherit the installing shell's Slack tokens.
-    for name in ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"] {
-        ensure!(
-            loaded
-                .env
-                .get(name)
-                .is_some_and(|value| !value.trim().is_empty()),
-            "{name} is blank in .env; the installed service reads Slack tokens only from .env"
-        );
-    }
     let service = service(home)?;
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let mut environment = BTreeMap::new();
@@ -109,6 +98,21 @@ pub fn install(home: &Path) -> Result<Value> {
     }
     if environment.get("PATH").is_none_or(String::is_empty) {
         bail!("PATH must contain your authenticated agent CLI when installing");
+    }
+    // The service sees only these variables and .env, not the installing shell.
+    let loaded = crate::config::load_with(&service.home, environment.clone()).map_err(|error| {
+        anyhow::anyhow!(
+            "{error:#}; set it in .env, because the installed service does not inherit your shell environment"
+        )
+    })?;
+    for (name, value) in [
+        ("SLACK_BOT_TOKEN", &loaded.tokens.bot),
+        ("SLACK_APP_TOKEN", &loaded.tokens.app),
+    ] {
+        ensure!(
+            !value.trim().is_empty(),
+            "{name} is blank in .env; the installed service reads Slack tokens only from .env"
+        );
     }
     fs::create_dir_all(service.home.join("logs"))?;
     fs::create_dir_all(service.file.parent().context("invalid service file path")?)?;

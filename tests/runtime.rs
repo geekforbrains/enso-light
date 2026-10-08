@@ -1,10 +1,10 @@
 //! Cross-module contracts exercised without Slack or native model processes.
 use enso::{
-    config::{ChannelRoute, ChannelSettings, Destination, Mention, SlackConfig, Tokens},
+    config::{Config, Destination},
     context,
     db::{Db, Session},
     formatting,
-    slack::{Admission, Incoming, Slack},
+    slack::{self, Admission, Incoming},
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Barrier};
@@ -16,24 +16,19 @@ fn database() -> (tempfile::TempDir, Db) {
 }
 
 fn incoming(channel: &str, ts: &str, thread: Option<&str>) -> Incoming {
-    let mut config = SlackConfig::default();
-    config.dms.insert("U1".into(), "main".into());
-    config.channels.insert(
-        "C1".into(),
-        ChannelRoute::Settings(ChannelSettings {
-            workspace: "main".into(),
-            mention: Some(Mention::Never),
-        }),
-    );
-    let slack = Slack::new(&config, &Tokens::default()).unwrap();
+    let config: Config = serde_json::from_value(json!({
+        "defaults": {"provider": "main"},
+        "slack": {
+            "dms": {"U1": "main"},
+            "channels": {"C1": {"workspace": "main", "mention": "never"}}
+        }
+    }))
+    .unwrap();
     let mut event = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":channel,"user":"U1","ts":ts,"text":"hello"}});
     if let Some(thread) = thread {
         event["event"]["thread_ts"] = json!(thread);
     }
-    match slack
-        .normalize(&event, "UBOT", Mention::Always, true)
-        .unwrap()
-    {
+    match slack::normalize(&event, "UBOT", &config, true).unwrap() {
         Admission::Accept(incoming) => *incoming,
         other => panic!("{other:?}"),
     }

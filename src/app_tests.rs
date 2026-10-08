@@ -61,7 +61,7 @@ impl Fixture {
         fs::write(
             home.path().join("config.json"),
             json!({
-                "defaults": {"provider": "main", "timeout_seconds": 5},
+                "defaults": {"provider": "main", "timeout_seconds": 60},
                 "providers": {
                     "main": {"cli": "claude", "executable": executable},
                     "opus": {"cli": "claude", "executable": executable, "model": "opus", "effort": "low", "args": ["--opus"]}
@@ -77,9 +77,9 @@ impl Fixture {
         .unwrap();
         let loaded = config::load(home.path()).unwrap();
         loaded.validate().unwrap();
-        config::scaffold(&loaded.config).unwrap();
+        assert!(config::scaffold(&loaded.config).1.is_empty());
         let db = Db::open(home.path()).unwrap();
-        let slack = Slack::new(&loaded.config.slack, &loaded.tokens).unwrap();
+        let slack = Slack::new(&loaded.tokens).unwrap();
         Self {
             home,
             db,
@@ -232,7 +232,7 @@ async fn job_pipeline_carries_prerun_context_variables_environment_and_postrun_r
     assert_eq!(settings["cli"], "claude");
     assert!(settings["model"].is_null() && settings["effort"].is_null());
     assert_eq!(settings["args"], json!([]));
-    assert_eq!(settings["timeout_seconds"], 5);
+    assert_eq!(settings["timeout_seconds"], 60);
     let workspace = fixture.workspace("workspaces/main");
     let expected_workspace = json!({"name":"main","path":workspace});
     assert_eq!(settings["workspace"], expected_workspace);
@@ -876,7 +876,6 @@ async fn attachment_download_uses_the_resolved_timeout() {
     let fixture = Fixture::new(false);
     let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let slack = Slack::with_test_endpoint(
-        &fixture.loaded.config.slack,
         &fixture.loaded.tokens,
         format!("http://{}", stalled.local_addr().unwrap()),
     );
@@ -1055,7 +1054,6 @@ async fn job_timeout_overrides_the_default_for_postrun() {
 fn status_reports_the_workspace_provider_and_native_defaults() {
     let fixture = Fixture::new(false);
     let mut config = fixture.loaded.config.clone();
-    let slack = Slack::new(&config.slack, &Tokens::default()).unwrap();
     let status = |config: &Config, ts: &str| {
         let user = if ts.ends_with("3.000001") {
             "UACME"
@@ -1063,7 +1061,7 @@ fn status_reports_the_workspace_provider_and_native_defaults() {
             "U1"
         };
         let payload = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":format!("D{user}"),"channel_type":"im","user":user,"ts":ts,"text":"!status"}});
-        accept_event(&fixture.db, &slack, config, "UBOT", &payload).unwrap();
+        accept_event(&fixture.db, config, "UBOT", &payload).unwrap();
         fixture
             .db
             .claim_delivery()
@@ -1100,29 +1098,14 @@ fn admission_applies_the_configured_default_mention_mode() {
         "C1".into(),
         crate::config::ChannelRoute::Workspace("main".into()),
     );
-    let slack = Slack::new(&config.slack, &Tokens::default()).unwrap();
     let payload = |ts: &str| json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":"C1","channel_type":"channel","user":"U1","ts":ts,"text":"hello"}});
-    accept_event(
-        &fixture.db,
-        &slack,
-        &config,
-        "UBOT",
-        &payload("1700000001.000001"),
-    )
-    .unwrap();
+    accept_event(&fixture.db, &config, "UBOT", &payload("1700000001.000001")).unwrap();
     // A routed channel whose mention rule does not match stays silent.
     assert!(fixture.db.claim().unwrap().is_none());
     assert!(fixture.replies().is_empty());
     assert_eq!(fixture.count("messages"), 0);
     config.defaults.mention = crate::config::Mention::Never;
-    accept_event(
-        &fixture.db,
-        &slack,
-        &config,
-        "UBOT",
-        &payload("1700000002.000001"),
-    )
-    .unwrap();
+    accept_event(&fixture.db, &config, "UBOT", &payload("1700000002.000001")).unwrap();
     assert!(fixture.db.claim().unwrap().is_some());
 }
 
@@ -1143,8 +1126,7 @@ fn event(
 
 impl Fixture {
     fn admit(&self, config: &Config, payload: &Value) {
-        let slack = Slack::new(&config.slack, &Tokens::default()).unwrap();
-        accept_event(&self.db, &slack, config, "UBOT", payload).unwrap();
+        accept_event(&self.db, config, "UBOT", payload).unwrap();
     }
 
     fn replies(&self) -> Vec<(Destination, String)> {
@@ -1392,5 +1374,122 @@ fn changed_errors_reports_new_and_changed_errors_and_forgets_cleared_ones() {
         changed_errors(&mut logged, errors(&[("a", "changed")])),
         ["changed"],
         "an error that returns after being fixed is logged again"
+    );
+}
+
+#[tokio::test]
+async fn status_flags_a_session_the_next_turn_would_reject() {
+    let fixture = Fixture::new(false);
+    let first = incoming("1700000001.000001", None, "U1", "Gavin", "First");
+    fixture.db.accept(&first, false).unwrap().unwrap();
+    let run = fixture.db.claim().unwrap().unwrap();
+    fixture.finish(&run, Some(&first), &fixture.loaded).await;
+    fixture.replies();
+    let status = |config: &Config, ts: &str| {
+        let payload = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":"DCHAT","channel_type":"im","user":"U1","ts":ts,"text":"!status"}});
+        accept_event(&fixture.db, config, "UBOT", &payload).unwrap();
+        fixture.replies().pop().unwrap().1
+    };
+    let mut config = fixture.loaded.config.clone();
+    let text = status(&config, "1700000002.000001");
+    assert!(text.ends_with("Session: active"), "{text}");
+    let stale = "Session: active from another CLI or workspace; use !clear";
+    config.slack.dms.insert("U1".into(), "acme".into());
+    let text = status(&config, "1700000003.000001");
+    assert!(text.ends_with(stale), "{text}");
+    config.slack.dms.insert("U1".into(), "main".into());
+    config.providers.get_mut("main").unwrap().cli = "codex".into();
+    let text = status(&config, "1700000004.000001");
+    assert!(text.ends_with(stale), "{text}");
+}
+
+#[test]
+fn unmentioned_thread_replies_use_participation_in_the_thread_root() {
+    use crate::config::{ChannelRoute, ChannelSettings, Mention};
+    let fixture = Fixture::new(false);
+    let mut config = fixture.loaded.config.clone();
+    let mut route = |mention| {
+        config.slack.channels.insert(
+            "C1".into(),
+            ChannelRoute::Settings(ChannelSettings {
+                workspace: "main".into(),
+                mention: Some(mention),
+            }),
+        );
+        config.clone()
+    };
+    let first = route(Mention::First);
+    let always = route(Mention::Always);
+    let root = "1700000001.000001";
+    fixture.admit(
+        &first,
+        &event("app_mention", "C1", "U1", root, None, "<@UBOT> start"),
+    );
+    assert_eq!(fixture.count("runs"), 1);
+    let reply = |ts| event("message", "C1", "U1", ts, Some(root), "more");
+    fixture.admit(&always, &reply("1700000002.000001"));
+    assert_eq!(fixture.count("runs"), 1);
+    assert!(fixture.replies().is_empty());
+    fixture.admit(&first, &reply("1700000003.000001"));
+    assert_eq!(fixture.count("runs"), 2);
+}
+
+#[test]
+fn startup_checks_the_database_first_and_logs_unusable_workspaces_and_jobs() {
+    let home = tempfile::tempdir().unwrap();
+    config::init(home.path()).unwrap();
+    fs::write(
+        home.path().join(".env"),
+        "SLACK_BOT_TOKEN=test-bot-token\nSLACK_APP_TOKEN=test-app-token\n",
+    )
+    .unwrap();
+    let locked = home.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+    fs::write(
+        home.path().join("config.json"),
+        json!({
+            "defaults": {"provider": "main"},
+            "providers": {"main": {"cli": "claude"}},
+            "workspaces": {
+                "main": {"path": "${ENSO_HOME}/workspaces/main"},
+                "ext": {"path": locked.join("acme")}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let broken = home.path().join("jobs/broken");
+    fs::create_dir(&broken).unwrap();
+    fs::write(broken.join("job.json"), r#"{"workspace":"other"}"#).unwrap();
+    fs::write(broken.join("prompt.md"), "Never runs.").unwrap();
+    // A database from another schema stops startup before anything is created.
+    rusqlite::Connection::open(home.path().join("enso.db"))
+        .unwrap()
+        .execute_batch("CREATE TABLE old(id); PRAGMA user_version=1;")
+        .unwrap();
+    let error = prepare(home.path(), &mut HashMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("enso.db uses schema 1"), "{error}");
+    assert!(!home.path().join("workspaces").exists());
+    fs::remove_file(home.path().join("enso.db")).unwrap();
+    let (_, lock, _, log) = prepare(home.path(), &mut HashMap::new()).unwrap();
+    drop(lock);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(home.path().join("workspaces/main/AGENTS.md").is_file());
+    assert_eq!(log.len(), 3, "{log:?}");
+    assert!(log[0].starts_with("Job schedule: job broken: "), "{log:?}");
+    assert_eq!(
+        log[1],
+        format!(
+            "Created workspace {}",
+            home.path().join("workspaces/main").display()
+        )
+    );
+    assert!(
+        log[2].starts_with("Workspace: workspaces.ext: create "),
+        "{log:?}"
     );
 }

@@ -27,9 +27,12 @@ The contract includes CLI behavior, configuration, hooks, and persisted state.
 Choose the smallest appropriate bump from `Unreleased` and the changes since
 the last release unless the user specifies a version. Document breaking changes
 and required operator actions explicitly. A change to the database schema needs
-a tested migration from supported released schemas. Keep configuration backward
-compatible where possible. Never advertise a binary-only upgrade as migrating
-an incompatible home. Automatic binary rollback is not a database rollback.
+a tested migration from supported released schemas, except that a pre-1.0
+minor release may instead require a new database: `Db::open` must then refuse
+older schemas with a clear message, and the changelog must give the manual
+upgrade steps. Keep configuration backward compatible where possible. Never
+advertise a binary-only upgrade as migrating an incompatible home. Automatic
+binary rollback is not a database rollback.
 
 ## Making a release
 

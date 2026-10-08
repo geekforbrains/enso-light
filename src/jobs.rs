@@ -54,6 +54,16 @@ fn enabled() -> bool {
     true
 }
 
+/// How many job directories exist, valid or not, without loading them.
+pub fn count(home: &Path) -> usize {
+    fs::read_dir(home.join("jobs")).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .count()
+    })
+}
+
 /// Every job directory by name, each with its definition or why it is invalid.
 pub fn list(home: &Path, config: &Config) -> Result<Vec<(String, Result<Job>)>> {
     let root = home.join("jobs");
@@ -333,7 +343,7 @@ mod tests {
     use super::*;
     use chrono::{Datelike, TimeZone};
 
-    fn defaults() -> Config {
+    fn config() -> Config {
         serde_json::from_str(
             r#"{"defaults":{"provider":"main"},"providers":{"main":{"cli":"claude"},"opus":{"cli":"claude","model":"opus"}},"workspaces":{"main":{"path":"/srv/main"},"acme":{"path":"/srv/acme"}}}"#,
         )
@@ -348,7 +358,7 @@ mod tests {
         fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
         let load_with = |definition: &str| {
             fs::write(directory.join("job.json"), definition).unwrap();
-            load(temp.path(), "report", &defaults())
+            load(temp.path(), "report", &config())
         };
         let job = load_with(r#"{"workspace":"main"}"#).unwrap();
         assert!(job.provider.is_none() && job.timeout_seconds.is_none());
@@ -372,10 +382,7 @@ mod tests {
         fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
         let load_with = |definition: &str| {
             fs::write(directory.join("job.json"), definition).unwrap();
-            format!(
-                "{:#}",
-                load(temp.path(), "report", &defaults()).unwrap_err()
-            )
+            format!("{:#}", load(temp.path(), "report", &config()).unwrap_err())
         };
         let missing = load_with("{}");
         assert!(missing.contains("missing field `workspace`"), "{missing}");
@@ -385,7 +392,7 @@ mod tests {
                 && unknown.contains("workspace \"other\" is not defined in workspaces"),
             "{unknown}"
         );
-        let jobs = list(temp.path(), &defaults()).unwrap();
+        let jobs = list(temp.path(), &config()).unwrap();
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].1.is_err());
     }
@@ -412,7 +419,7 @@ mod tests {
             fs::write(directory.join("job.json"), definition).unwrap();
             fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
         }
-        let jobs = list(temp.path(), &defaults()).unwrap();
+        let jobs = list(temp.path(), &config()).unwrap();
         let names: Vec<_> = jobs.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["bad", "bad name", "broken", "good", "old", "typed"]);
         assert_eq!(jobs[3].1.as_ref().unwrap().workspace, "main");
@@ -452,10 +459,10 @@ mod tests {
             r#"{"workspace":"main","cron":"0 9 * * MON-FRI"}"#,
         )
         .unwrap();
-        assert!(load(temp.path(), "report", &defaults()).is_err());
+        assert!(load(temp.path(), "report", &config()).is_err());
         fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
         fs::write(directory.join("prerun.sh"), "").unwrap();
-        let jobs = list(temp.path(), &defaults()).unwrap();
+        let jobs = list(temp.path(), &config()).unwrap();
         assert_eq!(jobs.len(), 1);
         let job = jobs[0].1.as_ref().unwrap();
         assert!(job.enabled && job.prerun && !job.postrun);
@@ -465,23 +472,20 @@ mod tests {
             r#"{"workspace":"main","retries":10}"#,
         )
         .unwrap();
-        assert_eq!(
-            load(temp.path(), "report", &defaults()).unwrap().retries,
-            10
-        );
+        assert_eq!(load(temp.path(), "report", &config()).unwrap().retries, 10);
         fs::write(
             directory.join("job.json"),
             r#"{"workspace":"main","retries":11}"#,
         )
         .unwrap();
-        assert!(load(temp.path(), "report", &defaults()).is_err());
+        assert!(load(temp.path(), "report", &config()).is_err());
         fs::write(
             directory.join("job.json"),
             r#"{"workspace":"main","retries":-1}"#,
         )
         .unwrap();
-        assert!(load(temp.path(), "report", &defaults()).is_err());
-        assert!(load(temp.path(), "../other", &defaults()).is_err());
+        assert!(load(temp.path(), "report", &config()).is_err());
+        assert!(load(temp.path(), "../other", &config()).is_err());
     }
 
     #[test]
@@ -492,7 +496,7 @@ mod tests {
         fs::write(directory.join("prompt.md"), "Write a report.").unwrap();
         let load_with = |definition: &str| {
             fs::write(directory.join("job.json"), definition).unwrap();
-            load(temp.path(), "report", &defaults())
+            load(temp.path(), "report", &config())
         };
         assert!(
             load_with(r#"{"workspace":"main"}"#)

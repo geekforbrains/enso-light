@@ -18,11 +18,18 @@ replacing existing ones. It runs `git init` in a home without `.git`, since
 Codex needs the repository to load the shared `AGENTS.md` and `.agents/skills`;
 without git it warns in its output instead of failing. It then creates each
 configured workspace whose directory is missing, as
-[scaffolded workspaces](configuration.md#workspace-scaffolding); the service does
-the same at startup. An existing `config.json` or `.env` that fails to load stops `init`
-before anything is created. `run` starts the
-foreground service. A lock allows only one service per Enso home. Job triggers
-and message sends need a running service; they submit work to SQLite.
+[scaffolded workspaces](configuration.md#workspace-scaffolding). An existing
+`config.json`, `.env`, or `enso.db` that fails to load stops `init` before
+anything is created. Its JSON output lists `workspaces_created`, any
+`warnings`, and a `next` step: fill in the starter blanks, fix the errors
+`enso config check` reports, or install and start the service once the
+configuration is valid.
+
+`run` starts the foreground service. A lock allows only one service per Enso
+home. Startup checks `enso.db` before creating anything, then creates missing
+workspaces like `init`; a workspace it cannot create is logged and skipped, and
+runs routed to it fail until it exists. Job triggers and message sends need a
+running service; they submit work to SQLite.
 
 Install git and an authenticated Claude Code or Codex CLI first, then install Enso:
 
@@ -44,8 +51,11 @@ Run `enso upgrade` from a terminal to download and verify the latest release,
 replace the executable at its existing path, and immediately restart this home's
 installed service. Active work is interrupted. It starts an installed service
 even if stopped; without an installed service it only updates the binary.
-An already current version does not restart. Config, credentials, jobs, workspace
-files, and database are preserved.
+An already current version does not restart. Config, credentials, jobs,
+workspace files, and database are preserved, but a release with breaking
+changes may need manual steps before the new version can start. Read its
+[changelog](../CHANGELOG.md) entry before upgrading; for example, upgrading
+0.1.x to 0.2.0 has its own procedure.
 
 Upgrades require a writable install directory and cannot run from an Enso agent
 or hook, since restarting stops those processes. Stop a foreground `enso run`
@@ -89,17 +99,22 @@ problem at once instead of stopping at the first:
 
 `errors` covers blank or unknown provider CLIs and names, unknown workspace and
 provider references in workspaces, routes, and jobs, relative workspace paths, a
-workspace path that is not a directory, invalid route keys and names, zero
-timeouts, blank `SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN`, and each invalid job.
+workspace path that is not a directory, invalid route keys and names, unknown
+`mention` modes, zero timeouts, blank `SLACK_BOT_TOKEN` or `SLACK_APP_TOKEN`,
+each invalid job, and an `enso.db` from an older release, which it reads
+without changing.
 `notes` are not errors: no configured `dms` or `channels`, a workspace directory
 that `init` or service start will create, or a Codex provider while the home is
 not a git repository. With an empty `slack.unconfigured_message`, the no-routes
 note says Enso will ignore every message instead. `jobs` counts job directories,
-valid or not. A `config.json` that cannot be loaded at all is a single error.
-The report never includes token values or other substituted values. The command exits non-zero
-when there are errors, ending with an error such as
+valid or not. A `config.json` that cannot be loaded at all is reported as one
+error; `providers` and `workspaces` are then 0, and jobs are not validated.
+The report never includes token values or other substituted values. The
+command exits non-zero when there are errors, ending with an error such as
 `config check found 3 errors`. `service install` refuses to install while
-`config check` has errors.
+`config check` has errors. It also loads the configuration with only the
+environment the service will have (`.env` plus `HOME`, `PATH`, and a few CLI
+variables), so a `${NAME}` that only your shell defines must be set in `.env`.
 
 `jobs list` shows each valid job's `enabled`, `cron`, `next_run`, and
 `last_run`, and each [invalid job](jobs.md#invalid-jobs) as
@@ -148,9 +163,9 @@ A failed download reports an error before starting the agent.
 ## Slack lookup and reactions
 
 `enso slack` commands call the Web API directly using the Slack tokens from
-`.env` or the environment. They
-work without a running Enso service or a Socket Mode connection and always return
-JSON; global `--json` makes it compact. Incoming-message routes do not limit
+`.env` or the environment; any assignment in `.env`, even an empty one, wins
+over an exported token. They work without a running Enso service or a Socket
+Mode connection and always return JSON; global `--json` makes it compact. Incoming-message routes do not limit
 these calls: the token's Slack permissions and conversation access determine
 what is available. Sending text and attachments still uses `enso message send`.
 
@@ -219,8 +234,10 @@ Running: 0 · queued: 0
 Session: active
 ```
 
-`!status` shows `native default` for an unset model or effort. `!clear` also
-unpins the session's CLI and workspace.
+`!status` shows `native default` for an unset model or effort, and
+`Session: active from another CLI or workspace; use !clear` when the stored
+session belongs to a CLI or workspace path the next turn would reject. `!clear`
+also unpins the session's CLI and workspace.
 
 Enso adds a working reaction while a turn runs, acknowledges queued turns, and
 reports failures and timeouts. Thread participation survives `!clear`.

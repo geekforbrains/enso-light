@@ -218,6 +218,9 @@ mod tests {
                         }
                         Err(error) => panic!("{error}"),
                     };
+                    // macOS accepted sockets inherit O_NONBLOCK, which would
+                    // ignore the read timeout and cut the request short.
+                    socket.set_nonblocking(false).unwrap();
                     socket
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
@@ -230,23 +233,28 @@ mod tests {
                         request.push(byte[0]);
                         assert!(request.len() < 16_384);
                     }
-                    let request = String::from_utf8(request).unwrap();
-                    let path = request.split_whitespace().nth(1).unwrap().to_owned();
-                    seen.lock().unwrap().push(path.clone());
-                    let body = match path.as_str() {
-                        "/repos/geekforbrains/enso-light/releases/latest"
-                        | "/repos/geekforbrains/enso-light/releases/tags/v0.2.0" => &release,
-                        "/sums" => &sums,
-                        "/archive" => &archive,
-                        _ => panic!("Unexpected update request: {path}"),
+                    let request = String::from_utf8_lossy(&request).into_owned();
+                    // A connection that closes without a request is not a request.
+                    let Some(path) = request.split_whitespace().nth(1).map(str::to_owned) else {
+                        continue;
                     };
-                    write!(
+                    seen.lock().unwrap().push(path.clone());
+                    // Unexpected paths are recorded for the test to assert on.
+                    let (status, body) = match path.as_str() {
+                        "/repos/geekforbrains/enso-light/releases/latest"
+                        | "/repos/geekforbrains/enso-light/releases/tags/v0.2.0" => {
+                            ("200 OK", &release)
+                        }
+                        "/sums" => ("200 OK", &sums),
+                        "/archive" => ("200 OK", &archive),
+                        _ => ("404 Not Found", &Vec::new()),
+                    };
+                    let _ = write!(
                         socket,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     )
-                    .unwrap();
-                    socket.write_all(body).unwrap();
+                    .and_then(|()| socket.write_all(body));
                 }
             });
             Self {
@@ -261,7 +269,26 @@ mod tests {
     impl Drop for ReleaseServer {
         fn drop(&mut self) {
             self.stopped.store(true, Ordering::Relaxed);
-            self.worker.take().unwrap().join().unwrap();
+            // Never panic again while unwinding; that aborts the whole test binary.
+            if let Err(error) = self.worker.take().unwrap().join()
+                && !thread::panicking()
+            {
+                std::panic::resume_unwind(error);
+            }
+            if !thread::panicking() {
+                for path in self.requests.lock().unwrap().iter() {
+                    assert!(
+                        [
+                            "/repos/geekforbrains/enso-light/releases/latest",
+                            "/repos/geekforbrains/enso-light/releases/tags/v0.2.0",
+                            "/sums",
+                            "/archive",
+                        ]
+                        .contains(&path.as_str()),
+                        "Unexpected update request: {path}"
+                    );
+                }
+            }
         }
     }
 

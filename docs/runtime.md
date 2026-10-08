@@ -27,8 +27,10 @@ timeout, workspace name and path, and injected metadata. The workspace and
 provider are selected on each turn. A conversation's native session is pinned to
 the CLI and workspace path that created it: switching to another provider with
 the same CLI, or to another workspace name with the same path, keeps the
-session. A different CLI or workspace path fails the turn until `!clear` starts
-a fresh session. Jobs start a fresh session every run.
+session. Paths are compared after removing redundant separators, so
+`/x/acme/` and `/x/acme` are the same workspace. A different CLI or workspace
+path fails the turn until `!clear` starts a fresh session. Jobs start a fresh
+session every run.
 
 ## Prompt context
 

@@ -314,7 +314,7 @@ pub async fn execute(command: SlackCommand, slack: Slack) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SlackConfig, Tokens};
+    use crate::config::Tokens;
     use clap::Parser;
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -383,11 +383,7 @@ mod tests {
             requests
         });
         (
-            Slack::with_test_endpoint(
-                &SlackConfig::default(),
-                &tokens,
-                format!("http://{address}"),
-            ),
+            Slack::with_test_endpoint(&tokens, format!("http://{address}")),
             task,
         )
     }
@@ -634,11 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_tokens_and_bad_identifiers_fail_without_a_network_request() {
-        let slack = Slack::with_test_endpoint(
-            &SlackConfig::default(),
-            &Tokens::default(),
-            "http://127.0.0.1:1".into(),
-        );
+        let slack = Slack::with_test_endpoint(&Tokens::default(), "http://127.0.0.1:1".into());
         let error = execute(command(&["search", "term"]), slack.clone())
             .await
             .unwrap_err()

@@ -141,6 +141,29 @@ fn upgrade_rejects_a_service_registered_to_another_executable() {
         "{error}"
     );
     fs::remove_dir_all(directory.path().join("jobs/broken")).unwrap();
+    // A variable only the installing shell has would leave the service unable to start.
+    let config = fs::read_to_string(directory.path().join("config.json")).unwrap();
+    let mut shell_only: Value = serde_json::from_str(&config).unwrap();
+    shell_only["workspaces"]["acme"] = json!({"path":"${WORK}/acme"});
+    fs::write(directory.path().join("config.json"), shell_only.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_enso"))
+        .arg("--home")
+        .arg(directory.path())
+        .args(["--json", "service", "install"])
+        .env("HOME", account.path())
+        .env("XDG_CONFIG_HOME", account.path().join("config"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("WORK", account.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("missing environment variable WORK; set it in .env"),
+        "{error}"
+    );
+    assert!(!account.path().join("Library").exists() && !account.path().join("config").exists());
+    fs::write(directory.path().join("config.json"), config).unwrap();
     let installed = successful(run(&["service", "install"]));
     let file = Path::new(installed["file"].as_str().unwrap());
     fs::write(file, "a service registered to another executable").unwrap();
@@ -158,6 +181,22 @@ fn add_job(home: &Path, name: &str, definition: Value) {
     fs::create_dir_all(&job).unwrap();
     fs::write(job.join("job.json"), definition.to_string()).unwrap();
     fs::write(job.join("prompt.md"), "This is a fake test job.").unwrap();
+}
+
+#[test]
+fn init_points_to_config_check_when_problems_go_beyond_the_starter_blanks() {
+    let fix = "Run enso config check and fix the errors it reports.";
+    let directory = configured_home();
+    let home = directory.path();
+    add_job(home, "broken", json!({"workspace":"other"}));
+    assert_eq!(successful(enso(home, &["init"]))["next"], fix);
+    fs::remove_dir_all(home.join("jobs/broken")).unwrap();
+    // A blank provider other than the starter's `main` is not a starter blank.
+    let path = home.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["providers"]["opus"]["cli"] = json!("");
+    fs::write(&path, config.to_string()).unwrap();
+    assert_eq!(successful(enso(home, &["init"]))["next"], fix);
 }
 
 #[test]
@@ -226,6 +265,15 @@ fn init_creates_a_git_home_with_shared_guidance_and_a_scaffolded_workspace() {
         );
     }
     assert_eq!(fs::read(home.join(".env")).unwrap(), original_env);
+    // A Codex provider in a home that is a git repository needs no warning.
+    fs::write(
+        home.join(".env"),
+        "SLACK_BOT_TOKEN=fake-bot-token\nSLACK_APP_TOKEN=fake-app-token\n",
+    )
+    .unwrap();
+    let (code, report, _) = check(home);
+    assert_eq!(code, Some(0), "{report}");
+    assert!(!has(&report["notes"], "Codex will not load"), "{report}");
 }
 
 #[test]
@@ -343,12 +391,13 @@ fn config_check_reports_every_error_and_note_at_once() {
     fs::write(
         home.join("config.json"),
         json!({
-            "defaults": {"provider": "missing", "timeout_seconds": 0},
+            "defaults": {"provider": "missing", "mention": "sometimes", "timeout_seconds": 0},
             "providers": {"main": {"cli": ""}, "codex": {"cli": "codex"}},
             "workspaces": {
                 "main": {"path": "${ENSO_HOME}/workspaces/main"},
                 "file": {"path": "${ENSO_HOME}/file"},
-                "relative": {"path": "workspaces/relative", "provider": "nope"}
+                "relative": {"path": "workspaces/relative", "provider": "nope"},
+                "bad ws": {"path": "${ENSO_HOME}/workspaces/bad"}
             },
             "slack": {"dms": {}, "channels": {}}
         })
@@ -368,13 +417,14 @@ fn config_check_reports_every_error_and_note_at_once() {
     assert_eq!(report["valid"], false);
     assert_eq!(
         (&report["providers"], &report["workspaces"], &report["jobs"]),
-        (&json!(2), &json!(3), &json!(4))
+        (&json!(2), &json!(4), &json!(4))
     );
     let errors = &report["errors"];
     for message in [
         r#"providers.main.cli is blank; set "claude" or "codex""#,
         "defaults.provider is not defined in providers",
         "defaults.timeout_seconds must be greater than zero",
+        r#"defaults.mention must be "always", "first", or "never""#,
         "workspaces.relative.path must be absolute",
         "workspaces.relative.provider is not defined in providers",
         "workspaces.file.path exists but is not a directory",
@@ -382,11 +432,13 @@ fn config_check_reports_every_error_and_note_at_once() {
         "job bad-provider: invalid provider",
         "job bad-workspace: invalid workspace",
         r#"job "bad name": job names may contain only"#,
+        r#"workspace name "bad ws" may contain only"#,
     ] {
         assert!(has(errors, message), "{message}: {errors:#}");
     }
-    assert_eq!(errors.as_array().unwrap().len(), 10, "{errors:#}");
-    assert!(stderr.contains("config check found 10 errors"), "{stderr}");
+    assert_eq!(errors.as_array().unwrap().len(), 12, "{errors:#}");
+    assert!(stderr.contains("config check found 12 errors"), "{stderr}");
+    assert!(!report.to_string().contains("sometimes"));
     let notes = &report["notes"];
     for message in [
         r#"no dms or channels are configured; Enso will reply "not configured" to every message"#,
@@ -489,6 +541,42 @@ fn config_check_never_echoes_substituted_values() {
 }
 
 #[test]
+fn config_check_rejects_an_old_database_without_changing_it() {
+    let directory = configured_home();
+    let home = directory.path();
+    assert_eq!(check(home).0, Some(0));
+    for name in ["enso.db", "enso.db-wal", "enso.db-shm"] {
+        let _ = fs::remove_file(home.join(name));
+    }
+    rusqlite::Connection::open(home.join("enso.db"))
+        .unwrap()
+        .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE old(id); PRAGMA user_version=1;")
+        .unwrap();
+    let (code, report, _) = check(home);
+    assert_eq!(code, Some(1));
+    assert!(
+        has(
+            &report["errors"],
+            "enso.db uses schema 1; Enso 0.2.0 needs a new database"
+        ),
+        "{report:#}"
+    );
+    let version: i64 = rusqlite::Connection::open(home.join("enso.db"))
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+    let rerun = enso(home, &["init"]);
+    assert!(!rerun.status.success());
+    fs::remove_file(home.join("enso.db")).unwrap();
+    let rerun = successful(enso(home, &["init"]));
+    assert_eq!(
+        rerun["next"],
+        "Install and start the service with enso service install and enso service start, or run enso service restart if it is installed."
+    );
+}
+
+#[test]
 fn config_check_reports_one_safe_error_when_config_json_cannot_load() {
     let directory = configured_home();
     let home = directory.path();
@@ -497,9 +585,11 @@ fn config_check_reports_one_safe_error_when_config_json_cannot_load() {
     config["execution"] = json!({"cli": "claude"});
     config["providers"]["main"]["cli"] = json!("");
     fs::write(&path, config.to_string()).unwrap();
+    add_job(home, "report", json!({"workspace":"main"}));
     let (code, report, _) = check(home);
     assert_eq!(code, Some(1));
     assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report:#}");
+    assert_eq!(report["jobs"], 1, "job directories count, valid or not");
     assert!(
         has(
             &report["errors"],

@@ -5,6 +5,77 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Upgrading from 0.1.x
+
+Enso 0.2.0 needs a rewritten `config.json`, a new home layout, and a new
+database. Follow these steps in order; 0.2.0 cannot start until they are done.
+
+1. Stop the service: `enso service stop`.
+2. Install 0.2.0 while the service is stopped by rerunning the installer:
+
+   ```sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/geekforbrains/enso-light/releases/latest/download/enso-installer.sh | sh
+   ```
+
+   `enso upgrade` from 0.1.x also installs it, but then restarts the service,
+   which fails until the remaining steps are done; run `enso service stop`
+   straight after it. Confirm with `enso --version`.
+3. Only now move the old database aside, since the 0.1.x updater recreates an
+   old one when it restarts the service. Conversations start fresh sessions,
+   and old run history stays in the moved files.
+
+   ```sh
+   cd ~/.enso && mkdir 0.1 && mv enso.db* 0.1/
+   ```
+
+4. Move `skills/` to `.agents/skills/` and the starter workspace from
+   `workspace/` to `workspaces/main/`. Its old `AGENTS.md` makes way for the
+   shared `~/.enso/AGENTS.md`, and its skill links become an empty
+   `.agents/skills/` for workspace-only skills. The commands stop without
+   changing anything if `.agents/skills` or `workspaces/main` already exists;
+   move your files into those by hand instead.
+
+   ```sh
+   cd ~/.enso && test ! -e .agents/skills && test ! -e workspaces/main &&
+     mkdir -p .agents workspaces && mv skills .agents/skills &&
+     mv workspace workspaces/main && mv workspaces/main/AGENTS.md AGENTS.md.0.1 &&
+     rm -f .agents/skills/enso/SKILL.md workspaces/main/CLAUDE.md \
+       workspaces/main/.agents/skills workspaces/main/.claude/skills &&
+     mkdir -p workspaces/main/.agents/skills workspaces/main/.claude &&
+     ln -s ../.agents/skills workspaces/main/.claude/skills
+   ```
+
+   `init` leaves this existing workspace as it is, so it has no `AGENTS.md` of
+   its own. For workspace-only instructions, add `workspaces/main/AGENTS.md`
+   and link `CLAUDE.md` to it with `ln -s AGENTS.md CLAUDE.md`.
+
+5. Rewrite `config.json` to the
+   [new shape](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#configjson):
+   - Move `execution`'s `cli`, `model`, `effort`, `executable`, and `args` to
+     `providers.main`, add `"defaults": {"provider": "main"}`, and move
+     `execution.timeout_seconds` to `defaults.timeout_seconds`. Set `model`
+     and `effort` to keep 0.1.x's Claude defaults of `sonnet` and `high`.
+   - Add `"workspaces": {"main": {"path": "${ENSO_HOME}/workspaces/main"}}`.
+   - Replace `"dm_users": ["U012345"]` with `"dms": {"U012345": "main"}`, and
+     each channel entry with `"C012345": "main"` or
+     `"C012345": {"workspace": "main", "mention": "first"}`. Replace
+     `slack.mentions` with `defaults.mention`. Mention rules map as both
+     required → `always`, thread `false` → `first`, and both `false` →
+     `never`; top-level `false` with thread `true` has no equivalent.
+   - Remove `bot_token`, `app_token`, and `user_token` from `slack`. Keep
+     `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in `.env`, and add
+     `SLACK_USER_TOKEN` there to keep workspace search.
+6. Add `"workspace": "main"` to each `job.json`, and replace a job's
+   `execution` block with a named `provider` and `timeout_seconds`. Hooks that
+   read `.workspace` from stdin now use `.workspace.path` or `$ENSO_WORKSPACE`.
+7. Grant Claude Code unattended permissions in provider `args` or a workspace's
+   `.claude/settings.json`, since runs no longer load `~/.claude` (see below).
+8. Run `enso init`, then `enso config check`, and fix any errors. `init` adds
+   the 0.2.0 `AGENTS.md`, `enso` skill, `.gitignore`, and git repository. Copy
+   personal edits from `AGENTS.md.0.1` into `AGENTS.md`, then delete
+   `AGENTS.md.0.1`. Keep edits to the old `enso` skill in a separate skill.
+9. Start the service: `enso service start`, then check `enso service status`.
+
 ### Added
 
 - Named `providers` in `config.json`, each a `cli` (`claude` or `codex`) with
@@ -13,7 +84,6 @@ Versioning and publication follow the [release flow](docs/releases.md).
   [configuration](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#providers).
 - `defaults.timeout_seconds`, overridable per job with `timeout_seconds`.
 - `${ENSO_HOME}` in `config.json` expands to the Enso home in use.
-- `!status`, the run context, and stored run settings name the provider.
 - Named `workspaces` in `config.json`, each an absolute `path` with an optional
   `provider`. Agents run in their conversation's or job's workspace, attachments
   go to its `uploads/<run-id>/`, and `ENSO_WORKSPACE` gives agents and hooks its
@@ -23,8 +93,9 @@ Versioning and publication follow the [release flow](docs/releases.md).
   `"*"` for any user or channel not listed. Channel `mention` modes (`always`,
   `first`, `never`) and `defaults.mention` set when a mention is needed. See
   [Slack routing](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#slack).
-- `!status` shows the conversation's workspace; the run context and stored run
-  settings include the workspace name and path.
+- `!status`, the run context, and stored run settings name the provider and
+  workspace. `!status` also says when the stored session belongs to another CLI
+  or workspace and needs `!clear`.
 - An unrouted DM, or an @mention in an unrouted channel, gets one reply with
   the user or channel ID to add to `slack.dms` or `slack.channels`. Customize
   the text with `slack.unconfigured_message`, or set it to `""` to stay silent.
@@ -38,26 +109,28 @@ Versioning and publication follow the [release flow](docs/releases.md).
   [instructions and skills](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#instructions-and-skills).
 - `enso init` and service startup create each missing workspace directory with
   a starter `AGENTS.md`, `CLAUDE.md` link, and `.agents/skills/`. Existing
-  directories are left untouched. See
+  directories are left untouched. Service startup logs a workspace it cannot
+  create and keeps running. See
   [workspace scaffolding](https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#workspace-scaffolding).
 
 ### Changed
 
 - **Breaking:** `config.json` replaces `execution` with `defaults` and
-  `providers`. Rewrite it to the new shape; an old file fails to load with an
-  error instead of being misread.
+  `providers`, and an old file fails to load with an error instead of being
+  misread. See [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/main/CHANGELOG.md#upgrading-from-01x).
 - **Breaking:** Slack tokens come only from `SLACK_BOT_TOKEN`,
   `SLACK_APP_TOKEN`, and optional `SLACK_USER_TOKEN` in `.env` or the
-  environment; the installed service reads them only from `.env`. Remove
-  `bot_token`, `app_token`, and `user_token` from `slack` in `config.json`, and
-  set `SLACK_USER_TOKEN` in `.env` to keep workspace search.
+  environment, never from `config.json`. An assignment in `.env`, even an empty
+  one, wins over an exported token, and the installed service reads tokens only
+  from `.env`.
 - A blank or left-out `model`, `effort`, or `executable` uses the CLI's own
   default for Claude Code too; Enso no longer defaults Claude to `sonnet`/`high`.
 - `enso config check` reports every problem at once as `errors`, plus `notes`
   for things to know (no routes yet, a workspace directory still to be
   created, Codex without a git home), and counts providers, workspaces, and
-  jobs instead of reporting `cli`. It exits non-zero when there are errors, and
-  `enso service install` refuses until they are fixed. See
+  jobs instead of reporting `cli`. It exits non-zero when there are errors.
+  `enso service install` refuses until they are fixed, and while `config.json`
+  uses a variable that only your shell defines rather than `.env`. See
   [checking configuration](https://github.com/geekforbrains/enso-light/blob/main/docs/cli.md#checking-configuration).
 - An invalid job no longer stops the service, the scheduler, or other jobs:
   it is skipped with a logged error, and `enso jobs list` shows it with its
@@ -66,16 +139,16 @@ Versioning and publication follow the [release flow](docs/releases.md).
 - A `config.json` or `job.json` with an unknown or missing field names it in
   the error, such as ``unknown field `execution` ``.
 - **Breaking:** jobs require `workspace` in `job.json`, naming a configured
-  workspace. Add `"workspace": "main"` to each existing job.
-- **Breaking:** the context header's `workspace` is an object with `name` and
-  `path` instead of a path string.
+  workspace.
+- **Breaking:** the context header's `workspace`, which prerun hooks receive on
+  stdin, is an object with `name` and `path` instead of a path string. Hooks
+  that read `.workspace` should use `.workspace.path` or `$ENSO_WORKSPACE`.
 - A conversation's native session is pinned to the CLI and workspace path that
   created it. Moving a conversation to another workspace path requires `!clear`.
 - **Breaking:** Enso 0.2.0 needs a new `enso.db`; an older database fails to
-  open. Stop the service, move `enso.db` together with any `enso.db-wal` and
-  `enso.db-shm` files aside (for example `mkdir 0.1 && mv enso.db* 0.1/`), and
-  start again. Conversations start fresh sessions, and old run history stays
-  in the moved files.
+  open, and the service then creates nothing in the home. `enso config check`
+  reports it too. See
+  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/main/CHANGELOG.md#upgrading-from-01x).
 - **Breaking:** Claude Code runs pass `--setting-sources project,local`, so
   they no longer load your personal `~/.claude` settings, skills, plugins, or
   `CLAUDE.md`. Grant unattended permissions in provider `args` (for example
@@ -86,35 +159,14 @@ Versioning and publication follow the [release flow](docs/releases.md).
   `ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_BEDROCK` into `~/.enso/.env` or a
   workspace's `.claude/settings.json`.
 - **Breaking:** the home layout moves `skills/` to `.agents/skills/` and the
-  starter workspace from `workspace/` to `workspaces/main/`, whose old
-  `AGENTS.md` is replaced by the shared `~/.enso/AGENTS.md`. Stop the service,
-  set `workspaces.main.path` to `${ENSO_HOME}/workspaces/main` in
-  `config.json`, then run:
-
-  ```sh
-  cd ~/.enso && mkdir -p .agents workspaces
-  mv skills .agents/skills && mv workspace workspaces/main
-  mv workspaces/main/AGENTS.md AGENTS.md.0.1
-  rm .agents/skills/enso/SKILL.md
-  rm workspaces/main/CLAUDE.md workspaces/main/.agents/skills workspaces/main/.claude/skills
-  enso init
-  ```
-
-  `enso init` writes the 0.2.0 `AGENTS.md` and `enso` skill, which describe
-  per-workspace runs and the new job fields. Copy any personal edits from
-  `AGENTS.md.0.1` into `AGENTS.md`, then delete `AGENTS.md.0.1`. If you edited
-  the old `enso` skill, keep those edits in a separate skill.
+  starter workspace from `workspace/` to `workspaces/main/`. See
+  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/main/CHANGELOG.md#upgrading-from-01x).
 
 ### Removed
 
 - **Breaking:** `slack.dm_users`, `slack.mentions`, and per-channel
-  `top_level`/`thread` rules. Rewrite them as routes: add the
-  `workspaces` entry `"main": {"path": "${ENSO_HOME}/workspaces/main"}`, replace
-  `"dm_users": ["U012345"]` with `"dms": {"U012345": "main"}`, and replace each
-  channel entry with `"C012345": "main"` or
-  `"C012345": {"workspace": "main", "mention": "first"}`. Mention rules map as
-  both required → `always`, thread `false` → `first`, both `false` → `never`;
-  top-level `false` with thread `true` has no equivalent.
+  `top_level`/`thread` rules, replaced by `slack.dms`, `slack.channels`
+  routes, and `mention` modes.
 - **Breaking:** the job `execution` overrides object. Define a provider and set
   the job's `provider` and `timeout_seconds` instead; see
   [jobs](https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md).

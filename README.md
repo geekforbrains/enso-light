@@ -49,6 +49,8 @@ To build from source, install Rust and run `cargo install --locked --path .`.
 
 Run `enso upgrade` from a terminal to install the latest release and immediately
 restart the service. Active work is interrupted. Configuration and runtime state
-are preserved. See [installation and upgrades](docs/cli.md).
+are preserved, but a release with breaking changes may need manual steps first;
+read its [changelog](CHANGELOG.md) entry before upgrading. See
+[installation and upgrades](docs/cli.md).
 
 Released under the [MIT license](LICENSE).

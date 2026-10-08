@@ -4,7 +4,7 @@ use crate::{
     context,
     db::{Db, Run, Session},
     formatting, jobs, runner,
-    slack::{Admission, Incoming, Slack},
+    slack::{self, Admission, Incoming, Slack},
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Local, Utc};
@@ -66,20 +66,43 @@ struct Event {
     payload: Value,
     accepted: oneshot::Sender<()>,
 }
-pub async fn run(home: PathBuf) -> Result<()> {
-    let loaded = config::load(&home)?;
+/// Service startup before Slack connects. The database is checked before any
+/// workspace is created, so a start that will fail changes nothing. A workspace
+/// or job that cannot be used is returned as a log line, never fatal.
+fn prepare(
+    home: &Path,
+    job_errors: &mut HashMap<String, String>,
+) -> Result<(Loaded, File, Db, Vec<String>)> {
+    let loaded = config::load(home)?;
     loaded.validate()?;
+    let lock = lock(home)?;
+    let db = Db::open(home)?;
+    let mut log = Vec::new();
+    for error in scheduled_jobs(home, &loaded.config, job_errors).1 {
+        log.push(format!("Job schedule: {}", redact(&error, &loaded)));
+    }
+    let (created, errors) = config::scaffold(&loaded.config);
+    log.extend(
+        created
+            .iter()
+            .map(|path| format!("Created workspace {}", path.display())),
+    );
+    log.extend(
+        errors
+            .iter()
+            .map(|error| format!("Workspace: {}", redact(error, &loaded))),
+    );
+    Ok((loaded, lock, db, log))
+}
+
+pub async fn run(home: PathBuf) -> Result<()> {
     let mut job_errors = HashMap::new();
-    for error in scheduled_jobs(&home, &loaded.config, &mut job_errors).1 {
-        eprintln!("Job schedule: {}", redact(&error, &loaded));
+    let (loaded, _lock, db, log) = prepare(&home, &mut job_errors)?;
+    for line in log {
+        eprintln!("{line}");
     }
-    let _lock = lock(&home)?;
-    for path in config::scaffold(&loaded.config)? {
-        eprintln!("Created workspace {}", path.display());
-    }
-    let db = Db::open(&home)?;
     db.runtime("starting", None)?;
-    let slack = Slack::new(&loaded.config.slack, &loaded.tokens)?;
+    let slack = Slack::new(&loaded.tokens)?;
     let loaded = Arc::new(loaded);
     let config = &loaded.config;
     let identity = slack
@@ -127,7 +150,7 @@ pub async fn run(home: PathBuf) -> Result<()> {
       loop {tokio::select! {
         _=tokio::signal::ctrl_c()=>break,
         _=signal.recv()=>break,
-        Some(event)=rx.recv()=>{let outcome=accept_event(&db,&slack,config,&identity.bot_user_id,&event.payload);match outcome{Ok(())=>{let _=event.accepted.send(());},Err(error)=>eprintln!("Slack admission: {}",redact(&format!("{error:#}"),&loaded))}},
+        Some(event)=rx.recv()=>{let outcome=accept_event(&db,config,&identity.bot_user_id,&event.payload);match outcome{Ok(())=>{let _=event.accepted.send(());},Err(error)=>eprintln!("Slack admission: {}",redact(&format!("{error:#}"),&loaded))}},
         Some(result)=tasks.join_next()=>{match result {Ok(id)=>{running.remove(&id);},Err(error)=>{return Err(anyhow::anyhow!("Execution worker stopped unexpectedly: {error}"))}}},
         _=tick.tick()=>{
             db.heartbeat()?;
@@ -280,7 +303,7 @@ async fn delivery_loop(slack: Slack, db: Db, cancel: CancellationToken) {
         }
     }
 }
-fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Value) -> Result<()> {
+fn accept_event(db: &Db, config: &Config, bot: &str, payload: &Value) -> Result<()> {
     let event = &payload["event"];
     let channel = event["channel"].as_str().unwrap_or("");
     let thread = event["thread_ts"]
@@ -288,7 +311,7 @@ fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Va
         .or(event["ts"].as_str())
         .unwrap_or("");
     let participated = db.participated(channel, thread)?;
-    let input = match slack.normalize(payload, bot, config.defaults.mention, participated)? {
+    let input = match slack::normalize(payload, bot, config, participated)? {
         Admission::Accept(input) => input,
         Admission::Unconfigured { reply, id, setting } => {
             let message = &config.slack.unconfigured_message;
@@ -318,7 +341,7 @@ fn accept_event(db: &Db, slack: &Slack, config: &Config, bot: &str, payload: &Va
         Some(match command{
         "!clear"=>match db.clear(&accepted.conversation_id){Ok(())=>"Conversation cleared. Your next message starts a fresh session.".into(),Err(e)=>e.to_string()},
         "!stop"=>{db.stop(&accepted.conversation_id)?;"Stopped active and queued work in this conversation.".into()},
-        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;let workspace=config.workspace(&input.workspace)?;let(name,provider)=config.provider(workspace.provider.as_deref())?;format!("Enso: {name} ({} / {} / {})\nWorkspace: {}\nRunning: {} · queued: {}\nSession: {}",provider.cli,provider.model.as_deref().unwrap_or("native default"),provider.effort.as_deref().unwrap_or("native default"),input.workspace,state["running"],state["queued"],if state["has_session"]==true{"active"}else{"not started"})},
+        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;let workspace=config.workspace(&input.workspace)?;let(name,provider)=config.provider(workspace.provider.as_deref())?;format!("Enso: {name} ({} / {} / {})\nWorkspace: {}\nRunning: {} · queued: {}\nSession: {}",provider.cli,provider.model.as_deref().unwrap_or("native default"),provider.effort.as_deref().unwrap_or("native default"),input.workspace,state["running"],state["queued"],if state["has_session"]!=true{"not started"}else if state["cli"]==provider.cli.as_str()&&state["workspace"]==workspace.path.to_string_lossy().as_ref(){"active"}else{"active from another CLI or workspace; use !clear"})},
         _=>"!clear — start a fresh session when idle\n!stop — cancel active and queued work\n!status — show session and queue\n!help — show these commands".into()
     })
     } else if accepted.busy {
@@ -449,7 +472,6 @@ async fn execute_inner(
             .and_then(|j| j.provider.as_deref())
             .or(workspace_config.provider.as_deref()),
     )?;
-    let (provider, settings) = (provider.to_owned(), settings.clone());
     let workspace = workspace_config.path.clone();
     let workspace_path = workspace.to_string_lossy().into_owned();
     let timeout_seconds = job
@@ -602,7 +624,7 @@ async fn execute_inner(
         &background,
         &request,
     )?;
-    let mut snapshot = serde_json::to_value(&settings)?;
+    let mut snapshot = serde_json::to_value(settings)?;
     snapshot["provider"] = json!(provider);
     snapshot["timeout_seconds"] = json!(timeout_seconds);
     snapshot["workspace"] = json!({"name":workspace_name,"path":workspace_path});
