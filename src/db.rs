@@ -20,7 +20,6 @@ pub struct Db {
 }
 #[derive(Debug)]
 pub struct Accepted {
-    pub message_id: String,
     pub conversation_id: String,
     pub run_id: Option<String>,
     pub busy: bool,
@@ -37,16 +36,6 @@ pub struct Run {
     pub created_at: i64,
     pub input: Value,
     pub session: Option<String>,
-    /// The CLI and workspace path that own `session`.
-    pub cli: Option<String>,
-    pub workspace: Option<String>,
-}
-/// A native session and the CLI and workspace path it belongs to.
-#[derive(Clone, Debug)]
-pub struct Session {
-    pub id: String,
-    pub cli: String,
-    pub workspace: String,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Delivery {
@@ -212,7 +201,6 @@ impl Db {
         tx.execute("INSERT INTO messages(id,direction,conversation_id,run_id,channel,thread,slack_ts,event_key,body,payload,state,created_at) VALUES(?1,'in',?2,?3,?4,?5,?6,?7,?8,?9,'received',?10)",params![message,conversation,run,incoming.channel,incoming.thread_ts.as_deref().unwrap_or(""),incoming.message_ts,key,incoming.text,serde_json::to_string(incoming)?,now()])?;
         tx.commit()?;
         Ok(Some(Accepted {
-            message_id: message,
             conversation_id: conversation,
             run_id: run,
             busy,
@@ -226,8 +214,9 @@ impl Db {
     ) -> Result<Option<String>> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(tick) = tick {
-            if tx
+        // An occurrence runs at most once, even if the local clock repeats a minute.
+        if let Some(tick) = tick
+            && tx
                 .query_row(
                     "SELECT 1 FROM runs WHERE job_name=?1 AND occurrence=?2",
                     params![name, tick],
@@ -235,13 +224,8 @@ impl Db {
                 )
                 .optional()?
                 .is_some()
-            {
-                return Ok(None);
-            }
-            let changed=tx.execute("INSERT INTO job_state(name,last_tick) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET last_tick=excluded.last_tick WHERE last_tick != excluded.last_tick",params![name,tick])?;
-            if changed == 0 {
-                return Ok(None);
-            }
+        {
+            return Ok(None);
         }
         let busy = tx.query_row(
             "SELECT count(*) FROM runs WHERE job_name=?1 AND state IN ('queued','running')",
@@ -263,7 +247,7 @@ impl Db {
     pub fn claim(&self) -> Result<Option<Run>> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let run=tx.query_row("SELECT r.id,r.kind,r.conversation_id,r.job_name,r.trigger,r.request,r.created_at,coalesce(m.payload,'{}'),c.session_id,c.cli,c.workspace,r.occurrence FROM runs r LEFT JOIN conversations c ON c.id=r.conversation_id LEFT JOIN messages m ON m.run_id=r.id AND m.direction='in' WHERE r.state='queued' AND NOT EXISTS(SELECT 1 FROM runs active WHERE active.state='running' AND ((active.conversation_id IS NOT NULL AND active.conversation_id=r.conversation_id) OR (active.job_name IS NOT NULL AND active.job_name=r.job_name))) ORDER BY r.created_at,r.rowid LIMIT 1",[],|r|Ok(Run{id:r.get(0)?,kind:r.get(1)?,conversation:r.get(2)?,job:r.get(3)?,trigger:r.get(4)?,request:r.get(5)?,created_at:r.get(6)?,input:serde_json::from_str(&r.get::<_,String>(7)?).unwrap_or(Value::Null),session:r.get(8)?,cli:r.get(9)?,workspace:r.get(10)?,occurrence:r.get(11)?})).optional()?;
+        let run=tx.query_row("SELECT r.id,r.kind,r.conversation_id,r.job_name,r.trigger,r.request,r.created_at,coalesce(m.payload,'{}'),c.session_id,r.occurrence FROM runs r LEFT JOIN conversations c ON c.id=r.conversation_id LEFT JOIN messages m ON m.run_id=r.id AND m.direction='in' WHERE r.state='queued' AND NOT EXISTS(SELECT 1 FROM runs active WHERE active.state='running' AND ((active.conversation_id IS NOT NULL AND active.conversation_id=r.conversation_id) OR (active.job_name IS NOT NULL AND active.job_name=r.job_name))) ORDER BY r.created_at,r.rowid LIMIT 1",[],|r|Ok(Run{id:r.get(0)?,kind:r.get(1)?,conversation:r.get(2)?,job:r.get(3)?,trigger:r.get(4)?,request:r.get(5)?,created_at:r.get(6)?,input:serde_json::from_str(&r.get::<_,String>(7)?).unwrap_or(Value::Null),session:r.get(8)?,occurrence:r.get(9)?})).optional()?;
         if let Some(r) = &run {
             tx.execute(
                 "UPDATE runs SET state='running',started_at=?2 WHERE id=?1",
@@ -300,7 +284,7 @@ impl Db {
         state: &str,
         result: &str,
         error: Option<&str>,
-        session: Option<&Session>,
+        session: Option<&str>,
     ) -> Result<()> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -309,7 +293,7 @@ impl Db {
             params![run, state, result, error, now()],
         )?;
         if let Some(session) = session {
-            tx.execute("UPDATE conversations SET session_id=?2,cli=?3,workspace=?4 WHERE id=(SELECT conversation_id FROM runs WHERE id=?1)",params![run,session.id,session.cli,session.workspace])?;
+            tx.execute("UPDATE conversations SET session_id=?2 WHERE id=(SELECT conversation_id FROM runs WHERE id=?1)",params![run,session])?;
         }
         tx.execute("UPDATE messages SET context_run_id=?1 WHERE run_id=?1 AND direction='out' AND EXISTS(SELECT 1 FROM runs r JOIN conversations c ON c.id=r.conversation_id WHERE r.id=?1 AND r.kind='chat' AND c.channel=messages.channel AND (c.kind IN ('dm','im') OR coalesce(nullif(messages.thread,''),messages.slack_ts)=c.thread))",[run])?;
         if state == "succeeded" {
@@ -347,7 +331,7 @@ impl Db {
             "Conversation is busy. Use !stop or wait before !clear."
         );
         tx.execute(
-            "UPDATE conversations SET session_id=NULL,cli=NULL,workspace=NULL WHERE id=?1",
+            "UPDATE conversations SET session_id=NULL WHERE id=?1",
             [conversation],
         )?;
         tx.commit()?;
@@ -355,12 +339,11 @@ impl Db {
     }
     pub fn conversation_status(&self, conversation: &str) -> Result<Value> {
         let c = self.connect()?;
-        let (cli, workspace, session): (Option<String>, Option<String>, Option<String>) = c
-            .query_row(
-                "SELECT cli,workspace,session_id FROM conversations WHERE id=?1",
-                [conversation],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
+        let session: Option<String> = c.query_row(
+            "SELECT session_id FROM conversations WHERE id=?1",
+            [conversation],
+            |r| r.get(0),
+        )?;
         let mut stmt=c.prepare("SELECT state,count(*) FROM runs WHERE conversation_id=?1 AND state IN ('queued','running') GROUP BY state")?;
         let counts = stmt
             .query_map([conversation], |r| {
@@ -368,7 +351,7 @@ impl Db {
             })?
             .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
         Ok(
-            json!({"conversation":conversation,"cli":cli,"workspace":workspace,"has_session":session.is_some(),"running":counts.get("running").unwrap_or(&0),"queued":counts.get("queued").unwrap_or(&0)}),
+            json!({"conversation":conversation,"has_session":session.is_some(),"running":counts.get("running").unwrap_or(&0),"queued":counts.get("queued").unwrap_or(&0)}),
         )
     }
     pub fn run(&self, run: &str) -> Result<Value> {
@@ -434,15 +417,6 @@ impl Db {
         tx.commit()?;
         Ok(delivery)
     }
-    pub fn delivered(
-        &self,
-        id: &str,
-        state: &str,
-        receipt: Option<&str>,
-        error: Option<&str>,
-    ) -> Result<()> {
-        self.record_delivery(id, state, receipt, None, error)
-    }
     pub fn record_delivery(
         &self,
         id: &str,
@@ -464,23 +438,6 @@ impl Db {
         let c = self.connect()?;
         let mut s=c.prepare("SELECT m.id,m.body,m.sent_at,m.run_id FROM messages m JOIN conversations c ON c.id=?1 WHERE m.direction='out' AND m.background=1 AND m.state='sent' AND m.context_run_id IS NULL AND m.channel=c.channel AND (c.kind IN ('dm','im') OR coalesce(nullif(m.thread,''),m.slack_ts)=c.thread) ORDER BY m.sent_at,m.rowid LIMIT 30")?;
         Ok(s.query_map([conversation],|r|Ok(json!({"id":r.get::<_,String>(0)?,"text":r.get::<_,String>(1)?,"sent_at":r.get::<_,Option<i64>>(2)?,"run_id":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-    pub fn record_attachments(&self, run: &str, files: &[crate::slack::Attachment]) -> Result<()> {
-        let mut c = self.connect()?;
-        let tx = c.transaction()?;
-        let message: String = tx.query_row(
-            "SELECT id FROM messages WHERE run_id=?1 AND direction='in'",
-            [run],
-            |r| r.get(0),
-        )?;
-        for f in files {
-            tx.execute(
-                "INSERT INTO attachments(message_id,name,path,media_type) VALUES(?1,?2,?3,?4)",
-                params![message, f.name, f.path.to_string_lossy(), f.media_type],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
     }
     /// Work is never replayed. Pending outbound sends are safe to keep; in-flight sends are uncertain.
     pub fn recover(&self) -> Result<Vec<Value>> {

@@ -22,12 +22,10 @@ and conversations run independently, with no global concurrency limit or setting
 A job's scheduled occurrence is skipped if that job is already queued or running.
 A run records its provider name, CLI, executable, model, effort, arguments,
 timeout, workspace name and path, and injected metadata. The workspace and
-provider are selected on each turn. A conversation's native session is pinned to
-the CLI and workspace path that created it: switching to another provider with
-the same CLI, or to another workspace name with the same path, keeps the
-session. Paths are compared after removing redundant separators, so
-`/x/acme/` and `/x/acme` are the same workspace. A different CLI or workspace
-path fails the turn until `!clear` starts a fresh session. Jobs start a fresh
+provider are selected on each turn, and a conversation's next turn resumes its
+native session with whatever CLI and workspace it is routed to. If that CLI
+cannot resume the session, for example after switching from Claude Code to
+Codex, the turn fails and `!clear` starts a fresh one. Jobs start a fresh
 session every run.
 
 A failed turn's error, which is also the Slack reply, says only that the CLI

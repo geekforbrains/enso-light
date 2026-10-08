@@ -53,6 +53,13 @@ Versioning and publication follow the [release flow](docs/releases.md).
   creates the starter `workspaces/main` with a new starter `config.json`;
   service startup creates nothing, and `config check` reports a workspace path
   that is not a directory as an error.
+- **Breaking:** a conversation's session is no longer pinned to the CLI and
+  workspace that started it. The next turn resumes it with whatever the
+  conversation is routed to; if that CLI cannot resume it, the turn fails with
+  the existing advice to use `!clear`. `!status` no longer reports a session
+  from another CLI or workspace.
+- Existing 0.2.0 databases keep working without a reset; the session-pinning
+  columns and two unused tables stay in them, unused.
 - `enso init` prints one fixed next step and no longer reads an existing
   `config.json`, `.env`, or `enso.db` or creates the database; the service
   creates it on start.

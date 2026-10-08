@@ -231,10 +231,7 @@ Running: 0 · queued: 0
 Session: active
 ```
 
-`!status` shows `native default` for an unset model or effort, and
-`Session: active from another CLI or workspace; use !clear` when the stored
-session belongs to a CLI or workspace path the next turn would reject. `!clear`
-also unpins the session's CLI and workspace.
+`!status` shows `native default` for an unset model or effort.
 
 Enso adds a working reaction while a turn runs, acknowledges queued turns, and
 reports failures and timeouts. Thread participation survives `!clear`.

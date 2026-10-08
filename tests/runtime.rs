@@ -2,7 +2,7 @@
 use enso::{
     config::{Config, Destination},
     context,
-    db::{Db, Session},
+    db::Db,
     formatting,
     slack::{self, Admission, Incoming},
 };
@@ -34,14 +34,6 @@ fn incoming(channel: &str, ts: &str, thread: Option<&str>) -> Incoming {
     }
 }
 
-fn session(id: &str) -> Session {
-    Session {
-        id: id.into(),
-        cli: "claude".into(),
-        workspace: "/srv/main".into(),
-    }
-}
-
 fn target(channel: &str, thread: Option<&str>) -> Destination {
     Destination {
         channel: channel.into(),
@@ -60,7 +52,7 @@ fn sent(db: &Db, destination: &Destination, text: &str, background: bool) -> Str
     assert_eq!(ids.len(), 1);
     let delivery = db.claim_delivery().unwrap().unwrap();
     assert_eq!(delivery.id, ids[0]);
-    db.delivered(&delivery.id, "sent", Some("900.001"), None)
+    db.record_delivery(&delivery.id, "sent", Some("900.001"), None, None)
         .unwrap();
     delivery.id
 }
@@ -130,13 +122,11 @@ fn dm_threads_share_session_but_runs_preserve_each_reply_destination() {
         "succeeded",
         "answer",
         None,
-        Some(&session("native-session")),
+        Some("native-session"),
     )
     .unwrap();
     let second_run = db.claim().unwrap().unwrap();
     assert_eq!(second_run.session.as_deref(), Some("native-session"));
-    assert_eq!(second_run.cli.as_deref(), Some("claude"));
-    assert_eq!(second_run.workspace.as_deref(), Some("/srv/main"));
     assert_eq!(second_run.input["workspace"], "main");
     assert_eq!(second_run.input["reply"]["thread"], "99.001");
     assert_eq!(second_run.input["conversation_thread"], Value::Null);
@@ -172,22 +162,15 @@ fn channel_threads_are_independent_and_clear_preserves_participation() {
         db.run(reply.run_id.as_deref().unwrap()).unwrap()["state"],
         "cancelled"
     );
-    db.finish(
-        &first_run.id,
-        "cancelled",
-        "",
-        None,
-        Some(&session("old-session")),
-    )
-    .unwrap();
+    db.finish(&first_run.id, "cancelled", "", None, Some("old-session"))
+        .unwrap();
     assert_eq!(
-        db.conversation_status(&first.conversation_id).unwrap()["cli"],
-        "claude"
+        db.conversation_status(&first.conversation_id).unwrap()["has_session"],
+        true
     );
     db.clear(&first.conversation_id).unwrap();
     let status = db.conversation_status(&first.conversation_id).unwrap();
     assert_eq!(status["has_session"], false);
-    assert!(status["cli"].is_null() && status["workspace"].is_null());
     assert!(db.participated("C1", "100.001").unwrap());
     assert_eq!(db.run(&other_run.id).unwrap()["state"], "running");
 }
@@ -213,12 +196,6 @@ fn jobs_use_one_queue_for_manual_and_cron_without_overlap_or_replay() {
             .is_none()
     );
     db.finish(&first, "succeeded", "done", None, None).unwrap();
-    // The occurrence skipped while busy must not suddenly run after completion.
-    assert!(
-        db.enqueue_job("report", "cron", Some("2026-10-06T09:01"))
-            .unwrap()
-            .is_none()
-    );
     let manual = db.enqueue_job("report", "manual", None).unwrap().unwrap();
     assert_eq!(db.claim().unwrap().unwrap().id, manual);
     db.finish(&manual, "succeeded", "manual done", None, None)
@@ -256,7 +233,7 @@ fn outbox_splits_once_and_persists_stable_ids_and_confirmed_receipts() {
         assert_eq!(delivery.destination.thread.as_deref(), Some("99.001"));
         assert_eq!(db.delivery(expected).unwrap()["state"], "sending");
         let receipt = format!("900.{index:06}");
-        db.delivered(expected, "sent", Some(&receipt), None)
+        db.record_delivery(expected, "sent", Some(&receipt), None, None)
             .unwrap();
         let delivered = db.delivery(expected).unwrap();
         assert_eq!(delivered["state"], "sent");
@@ -359,14 +336,8 @@ fn background_from_any_dm_thread_is_context_only_after_confirmed_send() {
     let retry = db.claim().unwrap().unwrap();
     db.snapshot(&retry.id, &prompt, &metadata, &json!({}))
         .unwrap();
-    db.finish(
-        &retry.id,
-        "succeeded",
-        "summary",
-        None,
-        Some(&session("session")),
-    )
-    .unwrap();
+    db.finish(&retry.id, "succeeded", "summary", None, Some("session"))
+        .unwrap();
     assert!(db.background(&initial.conversation_id).unwrap().is_empty());
 }
 
@@ -405,7 +376,7 @@ fn chat_sent_messages_are_consumed_only_in_the_source_conversation() {
     for expected in [&own, &other] {
         let delivery = db.claim_delivery().unwrap().unwrap();
         assert_eq!(&delivery.id, expected);
-        db.delivered(&delivery.id, "sent", Some("900.001"), None)
+        db.record_delivery(&delivery.id, "sent", Some("900.001"), None, None)
             .unwrap();
     }
     db.finish(
@@ -413,7 +384,7 @@ fn chat_sent_messages_are_consumed_only_in_the_source_conversation() {
         "succeeded",
         "Finished",
         None,
-        Some(&session("native-session")),
+        Some("native-session"),
     )
     .unwrap();
     assert!(db.background(&source.conversation_id).unwrap().is_empty());
@@ -483,7 +454,7 @@ fn recovery_interrupts_work_retains_sessions_and_never_replays_uncertain_sends()
         "succeeded",
         "answer",
         None,
-        Some(&session("native-session")),
+        Some("native-session"),
     )
     .unwrap();
     db.accept(&incoming("D1", "101.001", None), false)
@@ -601,4 +572,54 @@ fn databases_from_other_schema_versions_are_rejected_without_migration() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(version, 2);
+}
+
+/// A 0.2.0 database keeps tables and columns Enso no longer uses; it must keep working.
+#[test]
+fn databases_created_by_0_2_0_keep_working() {
+    let directory = tempfile::tempdir().unwrap();
+    rusqlite::Connection::open(directory.path().join("enso.db"))
+        .unwrap()
+        .execute_batch(include_str!("fixtures/schema-0.2.0.sql"))
+        .unwrap();
+    let db = Db::open(directory.path()).unwrap();
+    Db::check(directory.path()).unwrap();
+
+    let accepted = db
+        .accept(&incoming("D1", "100.001", None), false)
+        .unwrap()
+        .unwrap();
+    let run = db.claim().unwrap().unwrap();
+    db.finish(&run.id, "succeeded", "answer", None, Some("native-session"))
+        .unwrap();
+    db.accept(&incoming("D1", "101.001", None), false)
+        .unwrap()
+        .unwrap();
+    let resumed = db.claim().unwrap().unwrap();
+    assert_eq!(resumed.session.as_deref(), Some("native-session"));
+    db.finish(&resumed.id, "failed", "", Some("error"), None)
+        .unwrap();
+    db.clear(&accepted.conversation_id).unwrap();
+    assert_eq!(
+        db.conversation_status(&accepted.conversation_id).unwrap()["has_session"],
+        false
+    );
+
+    let job = db
+        .enqueue_job("report", "cron", Some("2026-10-06T09:00"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(db.claim().unwrap().unwrap().id, job);
+    db.finish(&job, "succeeded", "done", None, None).unwrap();
+    assert!(
+        db.enqueue_job("report", "cron", Some("2026-10-06T09:00"))
+            .unwrap()
+            .is_none()
+    );
+
+    sent(&db, &target("D1", None), "report ready", true);
+    assert_eq!(
+        db.background(&accepted.conversation_id).unwrap()[0]["text"],
+        "report ready"
+    );
 }

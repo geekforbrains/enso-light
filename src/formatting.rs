@@ -11,13 +11,9 @@ const LIMIT: usize = 12_000;
 
 /// Ordered chat.postMessage payloads, each persisted and delivered independently.
 /// Markdown goes in a `markdown` block; the raw chunk is the notification fallback.
+/// Blank text yields no payloads.
 pub fn messages(text: &str, plain: bool) -> Result<Vec<Value>> {
     ensure!(text.len() <= MAX_INPUT_BYTES, "Slack reply exceeds 1 MiB");
-    let text = if text.trim().is_empty() {
-        "(No text returned.)"
-    } else {
-        text
-    };
     Ok(chunks(text, plain)
         .into_iter()
         .map(|chunk| {
@@ -337,10 +333,7 @@ mod tests {
 
     #[test]
     fn blank_and_oversized_input() {
-        assert_eq!(
-            messages(" \n", false).unwrap()[0]["text"],
-            "(No text returned.)"
-        );
+        assert!(messages(" \n", false).unwrap().is_empty());
         assert!(messages(&"x".repeat(MAX_INPUT_BYTES + 1), false).is_err());
     }
 

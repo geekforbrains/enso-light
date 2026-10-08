@@ -2,7 +2,7 @@
 use crate::{
     config::{self, Config, Loaded},
     context,
-    db::{Db, Run, Session},
+    db::{Db, Run},
     formatting, jobs, runner,
     slack::{self, Admission, Incoming, Slack},
 };
@@ -323,7 +323,7 @@ fn accept_event(db: &Db, config: &Config, bot: &str, payload: &Value) -> Result<
         Some(match command{
         "!clear"=>match db.clear(&accepted.conversation_id){Ok(())=>"Conversation cleared. Your next message starts a fresh session.".into(),Err(e)=>e.to_string()},
         "!stop"=>{db.stop(&accepted.conversation_id)?;"Stopped active and queued work in this conversation.".into()},
-        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;let workspace=config.workspace(&input.workspace)?;let(name,provider)=config.provider(workspace.provider.as_deref())?;format!("Enso: {name} ({} / {} / {})\nWorkspace: {}\nRunning: {} · queued: {}\nSession: {}",provider.cli,provider.model.as_deref().unwrap_or("native default"),provider.effort.as_deref().unwrap_or("native default"),input.workspace,state["running"],state["queued"],if state["has_session"]!=true{"not started"}else if state["cli"]==provider.cli.as_str()&&state["workspace"]==workspace.path.to_string_lossy().as_ref(){"active"}else{"active from another CLI or workspace; use !clear"})},
+        "!status"=>{let state=db.conversation_status(&accepted.conversation_id)?;let workspace=config.workspace(&input.workspace)?;let(name,provider)=config.provider(workspace.provider.as_deref())?;format!("Enso: {name} ({} / {} / {})\nWorkspace: {}\nRunning: {} · queued: {}\nSession: {}",provider.cli,provider.model.as_deref().unwrap_or("native default"),provider.effort.as_deref().unwrap_or("native default"),input.workspace,state["running"],state["queued"],if state["has_session"]==true{"active"}else{"not started"})},
         _=>"!clear — start a fresh session when idle\n!stop — cancel active and queued work\n!status — show session and queue\n!help — show these commands".into()
     })
     } else if accepted.busy {
@@ -390,7 +390,13 @@ async fn execute(
     if cancel.is_cancelled() || db.cancelled(&work.id)? {
         state = "cancelled".into();
     }
-    db.finish(&work.id, &state, &text, error.as_deref(), session.as_ref())?;
+    db.finish(
+        &work.id,
+        &state,
+        &text,
+        error.as_deref(),
+        session.as_deref(),
+    )?;
     if let Some(input) = &incoming {
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
@@ -427,7 +433,7 @@ async fn execute(
     }
     Ok(())
 }
-type Completion = (String, String, Option<String>, Option<Session>);
+type Completion = (String, String, Option<String>, Option<String>);
 async fn execute_inner(
     home: &Path,
     db: &Db,
@@ -460,28 +466,10 @@ async fn execute_inner(
         .as_ref()
         .and_then(|j| j.timeout_seconds)
         .unwrap_or(config.defaults.timeout_seconds);
-    if work.session.is_some() {
-        ensure!(
-            work.cli.as_deref() == Some(settings.cli.as_str()),
-            "Configured CLI changed. Use !clear before starting a session with {}.",
-            settings.cli
-        );
-        ensure!(
-            work.workspace.as_deref() == Some(workspace_path.as_str()),
-            "This conversation's workspace changed. Use !clear to start a fresh session in {workspace_name}."
-        );
-    }
     ensure!(
         workspace.is_dir(),
         "workspace {workspace_name} directory does not exist: {workspace_path}"
     );
-    let pin = |session: Option<String>| {
-        session.map(|id| Session {
-            id,
-            cli: settings.cli.clone(),
-            workspace: workspace_path.clone(),
-        })
-    };
     let mut env = base_env.clone();
     for name in [
         "ENSO_HOME",
@@ -546,7 +534,6 @@ async fn execute_inner(
             _=cancel.cancelled()=>anyhow::bail!("cancelled"),
             result=tokio::time::timeout(Duration::from_secs(timeout_seconds.min(120)),slack.download(&input.files,&directory))=>result.context("timed_out: attachment download")??,
         };
-        db.record_attachments(&work.id, &files)?;
         images = files
             .iter()
             .filter(|f| {
@@ -651,7 +638,7 @@ async fn execute_inner(
             .as_ref()
             .filter(|job| job.postrun && !cancel.is_cancelled())
         else {
-            return Ok((state, text, error, pin(session)));
+            return Ok((state, text, error, session));
         };
         let mut input = header.clone();
         input["variables"] = json!(variables);
@@ -685,14 +672,14 @@ async fn execute_inner(
             db.record_attempts(&work.id, &attempts)?;
         }
         let Some(message) = retry else {
-            return Ok((state, text, error, pin(session)));
+            return Ok((state, text, error, session));
         };
         if attempt == max_attempts {
             error = Some(format!(
                 "postrun requested a retry with no retries left (retries: {}): {message}",
                 max_attempts - 1
             ));
-            return Ok(("failed".into(), text, error, pin(session)));
+            return Ok(("failed".into(), text, error, session));
         }
         attempt += 1;
         let note = format!(

@@ -155,7 +155,7 @@ impl Fixture {
                 &completion.0,
                 &completion.1,
                 completion.2.as_deref(),
-                completion.3.as_ref(),
+                completion.3.as_deref(),
             )
             .unwrap();
         completion
@@ -191,7 +191,7 @@ impl Fixture {
             .unwrap()
             .remove(0);
         self.db
-            .delivered(&id, "sent", Some("1700000000.000010"), None)
+            .record_delivery(&id, "sent", Some("1700000000.000010"), None, None)
             .unwrap();
         id
     }
@@ -503,12 +503,7 @@ async fn dispatch_runs_independent_work_without_a_cap_and_queues_busy_conversati
             tasks.spawn(async move {
                 started.send(work.id.clone()).await.unwrap();
                 release.cancelled().await;
-                let session = Session {
-                    id: SESSION.into(),
-                    cli: "claude".into(),
-                    workspace: "/srv/main".into(),
-                };
-                db.finish(&work.id, "succeeded", "done", None, Some(&session))
+                db.finish(&work.id, "succeeded", "done", None, Some(SESSION))
                     .unwrap();
             });
         };
@@ -557,13 +552,6 @@ async fn dispatch_runs_independent_work_without_a_cap_and_queues_busy_conversati
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, followup.run_id.unwrap());
     assert_eq!(ready[0].session.as_deref(), Some(SESSION));
-    assert!(
-        fixture
-            .db
-            .enqueue_job("report", "cron", Some("2026-10-06T09:00"))
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -587,10 +575,7 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     let run = fixture.db.claim().unwrap().unwrap();
     let completion = fixture.finish(&run, Some(&first), &fixture.loaded).await;
     assert_eq!(completion.0, "succeeded");
-    let session = completion.3.unwrap();
-    assert_eq!(session.id, SESSION);
-    assert_eq!(session.cli, "claude");
-    assert_eq!(session.workspace, fixture.workspace("workspaces/main"));
+    assert_eq!(completion.3.as_deref(), Some(SESSION));
     let (prompt, header, _) = fixture.snapshot(&run);
     assert_eq!(prompt, fixture.captured("input", &run));
     assert!(prompt.starts_with("<enso-context>\n"));
@@ -675,7 +660,7 @@ async fn chat_pipeline_resumes_one_dm_session_with_current_identity_destination_
     .await
     .unwrap();
     assert_eq!(completion.0, "succeeded");
-    assert_eq!(completion.3.unwrap().id, SESSION);
+    assert_eq!(completion.3.as_deref(), Some(SESSION));
     let (prompt, header, settings) = fixture.snapshot(&resumed);
     assert!(!prompt.contains("Earlier background report"));
     assert!(!prompt.contains("Unrelated conversation report"));
@@ -720,15 +705,10 @@ async fn resumable(fixture: &Fixture) -> (Incoming, Run, String) {
     fixture.db.accept(&second, false).unwrap().unwrap();
     let resumed = fixture.db.claim().unwrap().unwrap();
     assert_eq!(resumed.session.as_deref(), Some(SESSION));
-    assert_eq!(resumed.cli.as_deref(), Some("claude"));
-    assert_eq!(
-        resumed.workspace.as_deref(),
-        Some(fixture.workspace("workspaces/main").as_str())
-    );
     (second, resumed, accepted.conversation_id)
 }
 
-async fn resume_error(fixture: &Fixture, loaded: &Loaded, run: &Run, input: &Incoming) -> String {
+async fn run_error(fixture: &Fixture, loaded: &Loaded, run: &Run, input: &Incoming) -> String {
     let error = execute_inner(
         fixture.home.path(),
         &fixture.db,
@@ -753,60 +733,27 @@ async fn resume_error(fixture: &Fixture, loaded: &Loaded, run: &Run, input: &Inc
 }
 
 #[tokio::test]
-async fn resuming_a_session_under_a_provider_with_another_cli_requires_clear() {
-    let fixture = Fixture::new(false);
-    let (second, resumed, _) = resumable(&fixture).await;
-    let mut current = fixture.loaded.clone();
-    let mut codex = current.config.providers["main"].clone();
-    codex.cli = "codex".into();
-    current.config.providers.insert("codex".into(), codex);
-    current.config.defaults.provider = "codex".into();
-    let error = resume_error(&fixture, &current, &resumed, &second).await;
-    assert!(error.contains("Configured CLI changed"), "{error}");
-}
-
-#[tokio::test]
-async fn a_session_is_pinned_to_its_workspace_path_until_clear() {
+async fn sessions_resume_wherever_the_conversation_is_routed_until_clear() {
     let fixture = Fixture::new(false);
     let (mut second, resumed, conversation) = resumable(&fixture).await;
-    // The same path under another name keeps the session; a new path does not.
-    let mut current = fixture.loaded.clone();
-    current.config.workspaces.get_mut("main").unwrap().path = fixture.home.path().join("acme");
-    let error = resume_error(&fixture, &current, &resumed, &second).await;
-    assert_eq!(
-        error,
-        "This conversation's workspace changed. Use !clear to start a fresh session in main."
-    );
+    // The native CLI, not Enso, decides whether a session resumes in another workspace.
+    second.workspace = "acme".into();
     fixture
-        .db
-        .finish(&resumed.id, "failed", "", Some(&error), None)
-        .unwrap();
-    let mut alias = fixture.loaded.clone();
-    let main = alias.config.workspaces["main"].clone();
-    alias.config.workspaces.insert("same".into(), main);
-    second.message_ts = "1700000003.000001".into();
-    second.workspace = "same".into();
-    fixture.db.accept(&second, false).unwrap().unwrap();
-    let run = fixture.db.claim().unwrap().unwrap();
-    fixture.finish(&run, Some(&second), &alias).await;
+        .finish(&resumed, Some(&second), &fixture.loaded)
+        .await;
     assert!(
         fixture
-            .captured("args", &run)
+            .captured_in("acme", "args", &resumed)
             .contains(&format!("--resume\n{SESSION}\n"))
     );
     fixture.db.clear(&conversation).unwrap();
-    let status = fixture.db.conversation_status(&conversation).unwrap();
     assert_eq!(
-        (&status["has_session"], &status["cli"], &status["workspace"]),
-        (&json!(false), &Value::Null, &Value::Null)
+        fixture.db.conversation_status(&conversation).unwrap()["has_session"],
+        false
     );
-    second.message_ts = "1700000004.000001".into();
-    second.workspace = "acme".into();
+    second.message_ts = "1700000003.000001".into();
     fixture.db.accept(&second, false).unwrap().unwrap();
-    let run = fixture.db.claim().unwrap().unwrap();
-    assert!(run.session.is_none() && run.cli.is_none() && run.workspace.is_none());
-    let completion = fixture.finish(&run, Some(&second), &fixture.loaded).await;
-    assert_eq!(completion.3.unwrap().workspace, fixture.workspace("acme"));
+    assert!(fixture.db.claim().unwrap().unwrap().session.is_none());
 }
 
 #[tokio::test]
@@ -850,7 +797,7 @@ async fn a_missing_workspace_directory_fails_the_run() {
     input.workspace = "acme".into();
     fixture.db.accept(&input, false).unwrap().unwrap();
     let run = fixture.db.claim().unwrap().unwrap();
-    let error = resume_error(&fixture, &fixture.loaded, &run, &input).await;
+    let error = run_error(&fixture, &fixture.loaded, &run, &input).await;
     assert_eq!(
         error,
         format!(
@@ -1364,29 +1311,17 @@ fn changed_errors_reports_new_and_changed_errors_and_forgets_cleared_ones() {
 }
 
 #[tokio::test]
-async fn status_flags_a_session_the_next_turn_would_reject() {
+async fn status_reports_an_active_session() {
     let fixture = Fixture::new(false);
     let first = incoming("1700000001.000001", None, "U1", "Gavin", "First");
     fixture.db.accept(&first, false).unwrap().unwrap();
     let run = fixture.db.claim().unwrap().unwrap();
     fixture.finish(&run, Some(&first), &fixture.loaded).await;
     fixture.replies();
-    let status = |config: &Config, ts: &str| {
-        let payload = json!({"event_id":format!("Ev{ts}"),"event":{"type":"message","channel":"DCHAT","channel_type":"im","user":"U1","ts":ts,"text":"!status"}});
-        accept_event(&fixture.db, config, "UBOT", &payload).unwrap();
-        fixture.replies().pop().unwrap().1
-    };
-    let mut config = fixture.loaded.config.clone();
-    let text = status(&config, "1700000002.000001");
+    let payload = json!({"event_id":"Ev2","event":{"type":"message","channel":"DCHAT","channel_type":"im","user":"U1","ts":"1700000002.000001","text":"!status"}});
+    accept_event(&fixture.db, &fixture.loaded.config, "UBOT", &payload).unwrap();
+    let text = fixture.replies().pop().unwrap().1;
     assert!(text.ends_with("Session: active"), "{text}");
-    let stale = "Session: active from another CLI or workspace; use !clear";
-    config.slack.dms.insert("U1".into(), "acme".into());
-    let text = status(&config, "1700000003.000001");
-    assert!(text.ends_with(stale), "{text}");
-    config.slack.dms.insert("U1".into(), "main".into());
-    config.providers.get_mut("main").unwrap().cli = "codex".into();
-    let text = status(&config, "1700000004.000001");
-    assert!(text.ends_with(stale), "{text}");
 }
 
 #[test]
