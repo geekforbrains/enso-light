@@ -174,7 +174,7 @@ enso slack user USER
 enso slack history CHANNEL [--limit 50] [--cursor CURSOR] [--oldest TS] [--latest TS]
 enso slack thread CHANNEL ROOT_TS [--limit 50] [--cursor CURSOR] [--oldest TS] [--latest TS]
 enso slack message CHANNEL TS [--thread ROOT_TS]
-enso slack search QUERY [--channel CHANNEL] [--thread ROOT_TS] [--limit 50] [--cursor CURSOR]
+enso slack search QUERY [--limit 50] [--cursor CURSOR]
 enso slack link CHANNEL TS
 enso slack react CHANNEL TS EMOJI [--remove]
 ```
@@ -189,28 +189,18 @@ and thread responses keep Slack's `has_more` and
 `response_metadata.next_cursor` fields. Limits may be at most 200, or 100 for
 search.
 
-Search has two modes:
-
-- `enso slack search "release notes" --channel C012345` scans one page of
-  channel history for a literal, case-insensitive text match. Add `--thread`
-  to scan a thread instead. Results include scanned count and coverage/pagination
-  information (`scanned`, `scope`, `has_more`, and `next_cursor`). The limit
-  requests a page size, not a match count; `scanned` counts the actual messages
-  returned, including a thread's parent when Slack adds it to the page.
-  Channel history does not include
-  unreturned thread replies; read the relevant thread separately.
-  Continue with the returned cursor when more history is needed;
-  an empty page of matches does not establish that the whole channel has none.
-- `enso slack search "in:engineering from:me release"` uses Slack's native
-  query syntax and requires the optional `SLACK_USER_TOKEN` with `search:read`.
-  A bot token alone cannot perform this workspace search. See
-  [search setup](configuration.md#workspace-search). Results retain Slack's
-  `messages.matches` and native pagination fields.
+`enso slack search "in:engineering from:me release"` uses Slack's own
+`search.messages` query syntax; add `in:channel_name` to search one channel. It
+requires the optional `SLACK_USER_TOKEN` with `search:read`; a bot token alone
+cannot search. See [search setup](configuration.md#workspace-search). The
+response is Slack's own, including `messages.matches` and its pagination fields.
+To look through one conversation without a user token, page through `history` or
+`thread` instead.
 
 ```sh
 enso slack history C012345 --limit 20
 enso slack thread C012345 '1791295200.000100'
-enso slack search "release notes" --channel C012345 --limit 50
+enso slack search "in:engineering release notes" --limit 50
 enso slack link C012345 '1791295200.000100'
 enso slack react C012345 '1791295200.000100' eyes
 ```

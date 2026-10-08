@@ -325,7 +325,7 @@ restrict direct Web API lookups or reactions.
 
 ## Workspace search
 
-Search without `--channel` uses Slack's `search.messages` method, which requires
+`enso slack search` uses Slack's `search.messages` method, which requires
 a **user OAuth token** with `search:read`. Its results follow that user's Slack
 access and search settings. [Slack's method reference](https://docs.slack.dev/reference/methods/search.messages/)
 documents the supported query and pagination behavior.
@@ -333,7 +333,3 @@ documents the supported query and pagination behavior.
 To enable it, set `SLACK_USER_TOKEN` in `.env`. Leave it empty when no
 authorized user token is available. It does not change the bot token or Socket
 Mode connection.
-
-The existing bot setup is enough for `search --channel CHANNEL`, which scans
-one page of accessible history with a literal text filter. That operation does
-not enable workspace-wide Slack search; pass the returned cursor to scan more.

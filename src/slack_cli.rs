@@ -63,13 +63,9 @@ pub enum SlackCommand {
         #[arg(long)]
         thread: Option<String>,
     },
-    /// Search one history page with --channel, or Slack's index with a user token.
+    /// Search Slack's message index; needs SLACK_USER_TOKEN with search:read.
     Search {
         query: String,
-        #[arg(long)]
-        channel: Option<String>,
-        #[arg(long, requires = "channel")]
-        thread: Option<String>,
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
         limit: u16,
         #[arg(long)]
@@ -232,58 +228,12 @@ pub async fn execute(command: SlackCommand, slack: Slack) -> Result<Value> {
         }
         SlackCommand::Search {
             query,
-            channel,
-            thread,
             limit,
             cursor,
         } => {
             ensure!(!query.trim().is_empty(), "Search query must not be empty");
-            ensure!(
-                (1..=100).contains(&limit),
-                "Search limit must be between 1 and 100"
-            );
-            if let Some(channel) = channel {
-                let params = history_params(
-                    &channel,
-                    thread.as_deref(),
-                    HistoryPage {
-                        limit,
-                        cursor,
-                        oldest: None,
-                        latest: None,
-                    },
-                )?;
-                let method = if thread.is_some() {
-                    "conversations.replies"
-                } else {
-                    "conversations.history"
-                };
-                let response = slack.read(method, &params).await?;
-                let messages = response["messages"].as_array().cloned().unwrap_or_default();
-                let needle = query.to_lowercase();
-                let matches: Vec<_> = messages
-                    .iter()
-                    .filter(|m| {
-                        m["text"]
-                            .as_str()
-                            .is_some_and(|text| text.to_lowercase().contains(&needle))
-                    })
-                    .cloned()
-                    .collect();
-                let next_cursor = response
-                    .pointer("/response_metadata/next_cursor")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                Ok(
-                    json!({"ok":true,"mode":if thread.is_some(){"thread_history"}else{"channel_history"},"query":query,"channel":channel,"thread":thread,"scanned":messages.len(),"matches":matches,"has_more":response["has_more"].as_bool().unwrap_or(false)||!next_cursor.is_empty(),"next_cursor":next_cursor,"response_metadata":response["response_metadata"],"scope":"Case-insensitive literal text matching in this one returned history page only. Thread replies and other messages not returned by this page are excluded."}),
-                )
-            } else {
-                ensure!(thread.is_none(), "--thread requires --channel");
-                let params = json!({"query":query,"count":limit,"cursor":cursor.filter(|s| !s.is_empty()).unwrap_or_else(||"*".into())});
-                let mut response = slack.search_messages(&params).await?;
-                response["mode"] = json!("workspace_search");
-                Ok(response)
-            }
+            let params = json!({"query":query,"count":limit,"cursor":cursor.filter(|s| !s.is_empty()).unwrap_or_else(||"*".into())});
+            slack.search_messages(&params).await
         }
         SlackCommand::Link { channel, ts } => {
             identifier(&channel, "CGD", "Channel")?;
@@ -405,13 +355,13 @@ mod tests {
     }
 
     #[test]
-    fn clap_rejects_invalid_page_limits_and_thread_without_channel() {
+    fn clap_rejects_invalid_page_limits_and_search_channel() {
         for args in [
             vec!["slack", "channels", "--limit", "201"],
             vec!["slack", "users", "--limit", "0"],
             vec!["slack", "history", "C1", "--limit", "0"],
             vec!["slack", "search", "term", "--limit", "101"],
-            vec!["slack", "search", "term", "--thread", "123.000001"],
+            vec!["slack", "search", "term", "--channel", "C1"],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
@@ -530,70 +480,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_search_is_literal_case_insensitive_and_explicitly_one_page() {
-        let response = json!({"ok":true,"messages":[
-            {"ts":"100.000001","text":"Report [READY]"},
-            {"ts":"101.000001","text":"Report ready","reply_count":42},
-            {"ts":"102.000001","text":"Another report [ready]"}
-        ],"has_more":true,"response_metadata":{"next_cursor":"next"}});
-        for (args, method, mode) in [
-            (
-                vec!["search", "[ready]", "--channel", "C1"],
-                "conversations.history",
-                "channel_history",
-            ),
-            (
-                vec![
-                    "search",
-                    "[ready]",
-                    "--channel",
-                    "C1",
-                    "--thread",
-                    "99.000001",
-                ],
-                "conversations.replies",
-                "thread_history",
-            ),
-        ] {
-            let (slack, server) = fixture(tokens(), vec![response.clone()]).await;
-            let result = execute(command(&args), slack).await.unwrap();
-            assert_eq!(result["mode"], mode);
-            assert_eq!(result["scanned"], 3);
-            assert_eq!(result["matches"].as_array().unwrap().len(), 2);
-            assert_eq!(result["next_cursor"], "next");
-            assert_eq!(result["has_more"], true);
-            assert!(
-                result["scope"]
-                    .as_str()
-                    .unwrap()
-                    .contains("not returned by this page are excluded")
-            );
-            let requests = server.await.unwrap();
-            assert_eq!(requests.len(), 1);
-            assert_eq!(request_url(&requests[0]).path(), format!("/{method}"));
-            assert!(!query(&requests[0]).contains_key("query"));
-            assert!(requests[0].contains("authorization: Bearer fake-bot"));
-        }
-    }
-
-    #[tokio::test]
-    async fn scoped_search_does_not_mistake_an_empty_page_for_end_of_history() {
-        let (slack, server) = fixture(tokens(), vec![json!({"ok":true,"messages":[],"response_metadata":{"next_cursor":"next-empty-page"}})]).await;
-        let result = execute(
-            command(&["search", "term", "--channel", "C1", "--cursor", "previous"]),
-            slack,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result["scanned"], 0);
-        assert_eq!(result["has_more"], true);
-        assert_eq!(result["next_cursor"], "next-empty-page");
-        let requests = server.await.unwrap();
-        assert_eq!(query(&requests[0])["cursor"], "previous");
-        assert_eq!(requests.len(), 1);
-    }
-
-    #[tokio::test]
     async fn native_search_uses_only_user_token_and_native_cursor_parameters() {
         let response = json!({"ok":true,"query":"in:general report","messages":{"matches":[],"pagination":{"total_count":12},"next_cursor":"next-native"}});
         let mut tokens = tokens();
@@ -611,7 +497,6 @@ mod tests {
             ],
         ] {
             let result = execute(command(&args), slack.clone()).await.unwrap();
-            assert_eq!(result["mode"], "workspace_search");
             assert_eq!(result["messages"], response["messages"]);
         }
         let requests = server.await.unwrap();
@@ -662,7 +547,8 @@ mod tests {
         let (slack, server) = fixture(
             tokens(),
             vec![
-                json!({"ok":false,"error":"missing_scope","needed":"fake-user"}),
+                json!({"ok":false,"error":"missing_scope","needed":"users:read","provided":"chat:write"}),
+                json!({"ok":false,"error":"missing_scope","needed":"xoxb-fake-user"}),
                 json!({"ok":false,"error":"invalid_auth"}),
             ],
         )
@@ -671,15 +557,20 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(scope.contains("users:read") && scope.contains("reauthorize"));
-        assert!(!scope.contains("fake-user"));
+        assert!(scope.contains("Add users:read") && scope.contains("bot token"));
+        assert!(scope.contains("reinstall"));
+        let scope = execute(command(&["users"]), slack.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(scope.contains("the needed scope") && !scope.contains("xoxb"));
         let auth = execute(command(&["search", "sensitive-search-term"]), slack)
             .await
             .unwrap_err()
             .to_string();
         assert!(auth.contains("invalid_auth"));
         assert!(!auth.contains("fake-user") && !auth.contains("sensitive-search-term"));
-        assert_eq!(server.await.unwrap().len(), 2);
+        assert_eq!(server.await.unwrap().len(), 3);
     }
 
     #[tokio::test]

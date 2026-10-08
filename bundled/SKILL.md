@@ -19,7 +19,7 @@ enso slack users
 enso slack history C012345 --limit 20
 enso slack thread C012345 '1791295200.000100'
 enso slack message C012345 '1791295300.000200' --thread '1791295200.000100'
-enso slack search "release notes" --channel C012345
+enso slack search "in:engineering release notes"
 enso slack link C012345 '1791295200.000100'
 enso slack react C012345 '1791295200.000100' eyes
 ```
@@ -29,13 +29,10 @@ needed. Use `channel ID` or `user ID` for details; `react ... --remove` removes
 the bot's own reaction. Preserve timestamps as strings. Follow returned cursors for
 more channel, user, history, thread, or search results.
 
-`search --channel` filters one history page using a literal, case-insensitive
-match; add `--thread ROOT_TS` for a thread. Check scanned count and coverage,
-then paginate before treating absence as conclusive. Channel history excludes
-thread replies that were not returned; inspect those threads separately.
-Search without `--channel`
-uses Slack query syntax and needs an optional user token with `search:read`;
-do not assume the bot's existing credentials support workspace search.
+`search` uses Slack query syntax (`in:channel_name`, `from:<@U012345>`) and needs
+the optional `SLACK_USER_TOKEN` with `search:read`; without it, page through
+`history` or `thread` instead. Channel history excludes thread replies; read
+those threads separately.
 
 ## Send messages or files
 
@@ -97,7 +94,9 @@ Details: https://github.com/geekforbrains/enso-light/blob/main/docs/jobs.md
 `$ENSO_HOME/AGENTS.md` and `$ENSO_HOME/.agents/skills/` apply to every
 workspace inside the Enso home; a workspace's own `AGENTS.md` and
 `.agents/skills/` apply only to it, so put a skill there when only it needs one.
-`CLAUDE.md` and `.claude/skills` link to the same files for Claude Code.
+`CLAUDE.md` and `.claude/skills` link to the same files for Claude Code. Enso
+never creates workspace folders; to add a workspace, follow
+https://github.com/geekforbrains/enso-light/blob/main/docs/configuration.md#adding-a-workspace
 
 ## Configuration and status
 

@@ -564,25 +564,23 @@ fn check_api(method: &str, value: &Value) -> Result<()> {
         .filter(|s| s.len() < 80 && s.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
         .unwrap_or("unknown_error");
     if code == "missing_scope" {
-        let scopes = match method {
-            "search.messages" => "search:read on SLACK_USER_TOKEN",
-            "conversations.history" | "conversations.replies" => {
-                "channels:history, groups:history, im:history or mpim:history on the bot token, matching the conversation type"
-            }
-            "conversations.list" | "conversations.info" => {
-                "channels:read, groups:read, im:read or mpim:read on the bot token, matching the conversation types"
-            }
-            "users.list" | "users.info" => "users:read on the bot token",
-            "reactions.add" | "reactions.remove" => "reactions:write on the bot token",
-            "files.info" => "files:read on the bot token",
-            "files.getUploadURLExternal" | "files.completeUploadExternal" => {
-                "files:write on the bot token"
-            }
-            "chat.postMessage" => "chat:write on the bot token",
-            _ => "the method's required Slack scopes",
+        // Slack names the missing scope; echo it only when it looks like scope names.
+        let token = if method == "search.messages" {
+            "SLACK_USER_TOKEN"
+        } else {
+            "bot token"
         };
+        let scope = value["needed"]
+            .as_str()
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() < 200
+                    && s.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ":._,".contains(c))
+            })
+            .unwrap_or("the needed scope");
         bail!(
-            "Slack {method} failed (missing_scope). Grant {scopes}, then reinstall or reauthorize the Slack app."
+            "Slack {method} failed (missing_scope). Add {scope} to the Slack app's {token} scopes, then reinstall the app."
         );
     }
     if matches!(

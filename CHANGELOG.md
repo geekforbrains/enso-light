@@ -21,19 +21,6 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ### Changed
 
-- Claude Code runs use your normal `~/.claude` settings, skills, plugins, and
-  `CLAUDE.md` again: Enso no longer passes `--setting-sources project,local`.
-  Both CLIs now run as they do in a terminal opened in the workspace. Step 7 of
-  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/v0.2.0/CHANGELOG.md#upgrading-from-01x)
-  is no longer needed; anything you moved into provider `args`, `.env`, or a
-  workspace's `.claude/settings.json` keeps working.
-- Claude Code runs no longer get `--permission-prompts none`; print mode already
-  denies anything that would prompt, and your settings or provider `args` decide
-  the rest.
-- A failed turn reports that the CLI exited with a status or reported an error,
-  instead of a guessed category such as `authentication_failed`. The end of the
-  CLI's output now goes to the service log, with secrets redacted; a session
-  that cannot be resumed still says to use `!clear`.
 - **Breaking:** Enso adds no guidance of its own to prompts. The delivery,
   status-update, and job guidance it used to prepend to a new session now lives
   in the starter `AGENTS.md`, where you can edit it, and the `enso` skill is now
@@ -49,17 +36,21 @@ Versioning and publication follow the [release flow](docs/releases.md).
   inside the Enso home are in its git repository; for a Codex workspace
   elsewhere, trust the folder in Codex or add `--skip-git-repo-check` to the
   provider's `args`.
-- **Breaking:** Enso no longer creates workspace folders. `enso init` still
-  creates the starter `workspaces/main` with a new starter `config.json`;
-  service startup creates nothing, and `config check` reports a workspace path
-  that is not a directory as an error.
-- **Breaking:** a conversation's session is no longer pinned to the CLI and
-  workspace that started it. The next turn resumes it with whatever the
-  conversation is routed to; if that CLI cannot resume it, the turn fails with
-  the existing advice to use `!clear`. `!status` no longer reports a session
-  from another CLI or workspace.
-- Existing 0.2.0 databases keep working without a reset; the session-pinning
-  columns and two unused tables stay in them, unused.
+- Claude Code runs use your normal `~/.claude` settings, skills, plugins, and
+  `CLAUDE.md` again: Enso no longer passes `--setting-sources project,local`.
+  Both CLIs now run as they do in a terminal opened in the workspace. Step 7 of
+  [Upgrading from 0.1.x](https://github.com/geekforbrains/enso-light/blob/v0.2.0/CHANGELOG.md#upgrading-from-01x)
+  is no longer needed; anything you moved into provider `args`, `.env`, or a
+  workspace's `.claude/settings.json` keeps working.
+- Claude Code runs no longer get `--permission-prompts none`; print mode already
+  denies anything that would prompt, and your settings or provider `args` decide
+  the rest.
+- A failed turn reports that the CLI exited with a status or reported an error,
+  instead of a guessed category such as `authentication_failed`. The end of the
+  CLI's output now goes to the service log, with secrets redacted; a session
+  that cannot be resumed still says to use `!clear`.
+- A Slack `missing_scope` error names the scope Slack reports as missing and the
+  token that needs it, instead of Enso's own per-method list.
 - `enso init` prints one fixed next step and no longer reads an existing
   `config.json`, `.env`, or `enso.db` or creates the database; the service
   creates it on start.
@@ -69,6 +60,24 @@ Versioning and publication follow the [release flow](docs/releases.md).
 - Workspace names may use any characters; job names still use letters,
   numbers, hyphens, and underscores.
 - An invalid `job.json` reports the JSON parser's own message.
+- Existing 0.2.0 databases keep working without a reset; the session-pinning
+  columns and two unused tables stay in them, unused.
+
+### Removed
+
+- **Breaking:** Enso no longer creates workspace folders. `enso init` still
+  creates the starter `workspaces/main` with a new starter `config.json`;
+  service startup creates nothing, and `config check` reports a workspace path
+  that is not a directory as an error.
+- **Breaking:** a conversation's session is no longer pinned to the CLI and
+  workspace that started it. The next turn resumes it with whatever the
+  conversation is routed to; if that CLI cannot resume it, the turn fails with
+  the existing advice to use `!clear`. `!status` no longer reports a session
+  from another CLI or workspace.
+- **Breaking:** `enso slack search --channel` and `--thread`, which filtered one
+  page of history. Search with `SLACK_USER_TOKEN` and `in:channel_name` in the
+  query, or page through `enso slack history` and `thread`. Search output is
+  Slack's response as returned, without the added `mode` field.
 
 ## [0.2.0] - 2026-10-08
 
