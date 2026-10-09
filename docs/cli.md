@@ -41,7 +41,9 @@ enso service status
 
 The installer uses `~/.local/bin`; follow its PATH instructions if needed.
 Prebuilt binaries support macOS and Linux on ARM64 and x86-64. Source builds
-require Rust: `cargo install --locked --path .` from this repository.
+require Rust: `cargo install --locked --path .` from this repository. On macOS,
+use the [signed local build procedure](releases.md#macos-signing) when replacing
+a service binary whose privacy approvals you want to retain.
 
 Run `enso upgrade` from a terminal to download and verify the latest release,
 replace the executable at its existing path, and immediately restart this home's
@@ -70,6 +72,13 @@ installation requires `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` there; see
 [checking configuration](#checking-configuration).
 Reinstall if the Enso executable or the relevant `PATH` changes. Uninstall stops
 the service and removes registration; it preserves the entire Enso home.
+
+On macOS, the LaunchAgent enables `MaterializeDatalessFiles`, so reading an
+iCloud-only file can download its contents. Normal macOS privacy permissions
+still apply. Keep content searches narrow: recursively searching iCloud Drive
+can download every placeholder the search reads. Existing installations need
+`enso service install` followed by `enso service restart` once to apply this
+setting; a binary upgrade alone does not rewrite the LaunchAgent.
 
 ## Checking configuration
 

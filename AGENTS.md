@@ -17,3 +17,12 @@ create branches, push, or open PRs unless explicitly requested. Never commit sec
 `bundled/` contains starter files copied by `enso init`; those instructions apply
 to an installed workspace, not this source checkout. Keep source `CLAUDE.md` a
 relative symlink to this file. Installation and service changes require authorization.
+
+macOS signing credentials: 1Password vault `Enso`, item
+`Enso - Release - Apple Signing`; fields `CODESIGN_IDENTITY`,
+`CODESIGN_CERTIFICATE` (base64 PKCS#12), and `CODESIGN_CERTIFICATE_PASSWORD`.
+Use the `1password` skill. GitHub Actions uses repository secrets with the same
+names. Follow `docs/releases.md` when signing local builds or changing signing.
+Before replacing an installed macOS service binary, sign the staged build with
+`scripts/sign-macos.sh` and the release identity. Do not install an ad-hoc build
+over it with `cargo install`; that changes its privacy-permission identity.

@@ -5,8 +5,18 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Changed
+
+- macOS release builds use Developer ID signing and the stable
+  `com.geekforbrains.enso` identity. Grant privacy permissions once after moving
+  from an ad-hoc build; subsequent consistently signed builds retain the same
+  code identity. Local service builds must use the same signing identity.
+
 ### Fixed
 
+- macOS service installations enable iCloud placeholder downloads on read.
+  Existing installations need `enso service install` and `enso service restart`
+  once to update their LaunchAgent. Broad content searches can download many files.
 - Explicitly release the daemon lock when startup fails or the service exits,
   preventing inherited file handles from making an immediate retry report that
   Enso is already running.

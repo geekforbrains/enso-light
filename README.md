@@ -47,6 +47,8 @@ the shared instructions and skills), and macOS or Linux on ARM64 or x86-64.
 Service installation uses your user's launchd or systemd manager.
 The installer places Enso in `~/.local/bin`; follow its PATH instructions if needed.
 To build from source, install Rust and run `cargo install --locked --path .`.
+For a macOS service, use the [signed local build procedure](docs/releases.md#macos-signing)
+to keep a consistent identity for privacy permissions across rebuilds.
 
 Run `enso upgrade` from a terminal to install the latest release and immediately
 restart the service. Active work is interrupted. Configuration and runtime state

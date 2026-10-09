@@ -1,0 +1,9 @@
+- name: Require macOS release signing credentials
+  if: runner.os == 'macOS'
+  shell: bash
+  run: |
+    # cargo-dist otherwise warns and silently produces an unsigned release.
+    : "${CODESIGN_CERTIFICATE:?Missing CODESIGN_CERTIFICATE repository secret}"
+    : "${CODESIGN_CERTIFICATE_PASSWORD:?Missing CODESIGN_CERTIFICATE_PASSWORD repository secret}"
+    : "${CODESIGN_IDENTITY:?Missing CODESIGN_IDENTITY repository secret}"
+    echo 'CODESIGN_OPTIONS=runtime' >> "$GITHUB_ENV"

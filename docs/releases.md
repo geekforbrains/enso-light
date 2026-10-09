@@ -106,6 +106,46 @@ credentials, jobs, workspace files, and SQLite state are preserved. A failed
 download or verification leaves the old binary in place; a restart failure
 reports that the new binary is installed and points to service status and logs.
 
+## macOS signing
+
+macOS executables embed `macos/Info.plist` with the fixed signing identifier
+`com.geekforbrains.enso`. cargo-dist signs them with a Developer ID Application
+certificate before creating archives and checksums. Its generated workflow uses
+the repository secrets `CODESIGN_IDENTITY`, `CODESIGN_CERTIFICATE` (base64-encoded
+PKCS#12 certificate and private key), and `CODESIGN_CERTIFICATE_PASSWORD`.
+`.github/build-setup.yml` requires all three on macOS so missing credentials
+cannot silently produce an unsigned release, and enables hardened runtime.
+The credential source for maintainers is named in `AGENTS.md`.
+
+Keep the signing identifier and Developer ID team consistent across updates.
+Apple Development and Developer ID Application signatures have different default
+designated requirements. Grant macOS privacy permissions once after moving from
+the old ad-hoc binary to the signed binary; changing back to an ad-hoc or
+development-signed build may require another approval. A fixed identifier alone
+does not make ad-hoc builds retain their identity.
+
+For local builds installed as the service, use the same Developer ID Application
+identity as releases. With that certificate and private key in your Keychain:
+
+```sh
+cargo build --locked --release
+export CODESIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'
+./scripts/sign-macos.sh target/release/enso
+# Stop active work first; replace the executable rather than modifying it in place.
+install -m 755 target/release/enso ~/.local/bin/.enso-new
+mv -f ~/.local/bin/.enso-new ~/.local/bin/enso
+enso service restart
+```
+
+Do not use an ordinary `cargo install` to replace a signed service binary: it
+installs an ad-hoc build. Certificate signing currently does not submit releases
+to Apple's notarization service; notarization is separate from the stable code
+identity needed to retain privacy approvals.
+
+When validating signing changes, inspect `codesign -d -r- BINARY` on two different
+builds and confirm that each satisfies the other's designated requirement. Check
+the actual executable extracted from a release archive, not only a build output.
+
 ## References
 
 - [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
