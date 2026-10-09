@@ -1361,6 +1361,73 @@ fn unmentioned_thread_replies_use_participation_in_the_thread_root() {
 }
 
 #[test]
+fn delivered_agent_messages_join_channel_threads_without_a_mention() {
+    use crate::config::{ChannelRoute, Mention};
+    for mention in [Mention::First, Mention::Never] {
+        for thread in [None, Some("1700000000.000001")] {
+            let fixture = Fixture::new(false);
+            let mut config = fixture.loaded.config.clone();
+            config.defaults.mention = mention;
+            config
+                .slack
+                .channels
+                .insert("C1".into(), ChannelRoute::Workspace("main".into()));
+            let message_ts = "1700000001.000001";
+            let root = thread.unwrap_or(message_ts);
+            let id = fixture
+                .db
+                .outgoing(
+                    &Destination {
+                        channel: "C1".into(),
+                        thread: thread.map(str::to_owned),
+                    },
+                    formatting::messages("Scheduled report", true).unwrap(),
+                    &[],
+                    None,
+                    true,
+                )
+                .unwrap()
+                .remove(0);
+            let reply = event(
+                "message",
+                "C1",
+                "U1",
+                "1700000002.000001",
+                Some(root),
+                "Tell me more",
+            );
+            fixture.admit(&config, &reply);
+            assert_eq!(fixture.count("runs"), 0, "A pending send has not joined");
+            fixture
+                .db
+                .record_delivery(&id, "sent", Some(message_ts), None, None)
+                .unwrap();
+            // Sending joins the thread without starting a session or run.
+            assert_eq!(fixture.count("conversations"), 0);
+            let mut always = config.clone();
+            always.defaults.mention = Mention::Always;
+            fixture.admit(&always, &reply);
+            assert_eq!(fixture.count("runs"), 0);
+            fixture.admit(&config, &reply);
+            let run = fixture
+                .db
+                .claim()
+                .unwrap()
+                .expect("Reply should start a run");
+            assert_eq!(run.request, "Tell me more");
+            assert!(run.session.is_none());
+            assert_eq!(
+                fixture
+                    .db
+                    .background(run.conversation.as_ref().unwrap())
+                    .unwrap()[0]["id"],
+                id
+            );
+        }
+    }
+}
+
+#[test]
 fn startup_checks_the_database_first_and_tolerates_unusable_workspaces_and_jobs() {
     let home = tempfile::tempdir().unwrap();
     config::init(home.path()).unwrap();

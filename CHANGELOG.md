@@ -5,6 +5,14 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-09
+
+### Fixed
+
+- Replies to channel threads started or joined by `enso message send`, including
+  job notifications, no longer require an @mention when the channel's mention
+  mode is `first` or `never`. Previously delivered messages count too.
+
 ## [0.3.0] - 2026-10-08
 
 ### Upgrading from 0.2.0
@@ -307,7 +315,8 @@ First public release of Enso Light, the standalone Rust Slack-to-CLI service.
 - This release does not migrate homes from the previous Python Enso project.
   Initialize a separate home when moving from that application.
 
-[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/geekforbrains/enso-light/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/geekforbrains/enso-light/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/geekforbrains/enso-light/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/geekforbrains/enso-light/compare/v0.1.0...v0.1.1

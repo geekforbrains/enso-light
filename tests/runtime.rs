@@ -419,9 +419,55 @@ fn channel_background_thread_follows_the_reply_root() {
 }
 
 #[test]
+fn outgoing_thread_participation_requires_a_confirmed_agent_send() {
+    let (directory, db) = database();
+    let root = "100.001";
+    let id = db
+        .outgoing(&target("C1", Some(root)), plain("Report"), &[], None, true)
+        .unwrap()
+        .remove(0);
+    assert!(!db.participated("C1", root).unwrap());
+    assert_eq!(db.claim_delivery().unwrap().unwrap().id, id);
+    assert!(!db.participated("C1", root).unwrap());
+    for state in ["failed", "uncertain"] {
+        db.record_delivery(&id, state, None, None, Some("Send failed"))
+            .unwrap();
+        assert!(!db.participated("C1", root).unwrap());
+    }
+    // File uploads in a known thread can succeed without a message timestamp.
+    db.record_delivery(&id, "sent", None, Some("FREPORT"), None)
+        .unwrap();
+    let reopened = Db::open(directory.path()).unwrap();
+    assert!(reopened.participated("C1", root).unwrap());
+    assert!(!reopened.participated("C2", root).unwrap());
+    assert!(!reopened.participated("C1", "200.001").unwrap());
+    assert!(!reopened.participated("C1", "FREPORT").unwrap());
+
+    // Setup notices for unconfigured channels must not join their threads.
+    sent(
+        &db,
+        &target("C2", Some(root)),
+        "Configure this channel",
+        false,
+    );
+    assert!(!db.participated("C2", root).unwrap());
+    // A top-level upload without a message timestamp cannot identify its thread.
+    let id = db
+        .outgoing(&target("C3", None), plain("Report"), &[], None, true)
+        .unwrap()
+        .remove(0);
+    db.record_delivery(&id, "sent", None, Some("FREPORT"), None)
+        .unwrap();
+    assert!(!db.participated("C3", "FREPORT").unwrap());
+    assert!(!db.participated("C3", "").unwrap());
+}
+
+#[test]
 fn top_level_channel_background_belongs_to_its_own_reply_thread() {
     let (_directory, db) = database();
     let id = sent(&db, &target("C1", None), "Scheduled report", true);
+    assert!(db.participated("C1", "900.001").unwrap());
+    assert!(!db.participated("C1", "200.001").unwrap());
     let relevant = db
         .accept(&incoming("C1", "901.001", Some("900.001")), true)
         .unwrap()
@@ -524,6 +570,8 @@ fn file_receipt_keeps_file_identity_and_routes_background_by_actual_share_messag
     let receipt = db.delivery(&id).unwrap();
     assert_eq!(receipt["receipt"], "FREPORT");
     assert_eq!(receipt["message_ts"], "900.000001");
+    assert!(db.participated("C1", "900.000001").unwrap());
+    assert!(!db.participated("C1", "FREPORT").unwrap());
     let relevant = db
         .accept(&incoming("C1", "901.000001", Some("900.000001")), true)
         .unwrap()

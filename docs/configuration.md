@@ -232,6 +232,11 @@ session.
 
 Other thread replies need a mention.
 
+Enso joins a thread when it accepts a message there or successfully delivers an
+agent message with `enso message send`, including a job notification. A top-level
+agent message joins the thread rooted at that message. Previously delivered
+messages count too; failed or uncertain sends and channel-setup notices do not.
+
 #### Unconfigured conversations
 
 When no route matches a DM, or an @mention in a channel, Enso replies once per

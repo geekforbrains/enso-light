@@ -146,15 +146,17 @@ impl Db {
         Ok(value.unwrap_or(json!({"slack":"stopped"})))
     }
     pub fn participated(&self, channel: &str, thread: &str) -> Result<bool> {
-        Ok(self
-            .connect()?
-            .query_row(
-                "SELECT 1 FROM conversations WHERE channel=?1 AND thread=?2",
-                params![channel, thread],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
+        // Agent sends can join a thread before any incoming message creates a
+        // conversation. A top-level send's own Slack timestamp is its root.
+        // Only background sends count here; setup notices must not join threads.
+        Ok(self.connect()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE channel=?1 AND thread=?2)
+             OR EXISTS(SELECT 1 FROM messages WHERE channel=?1 AND direction='out'
+                 AND state='sent' AND background=1
+                 AND coalesce(nullif(thread,''),slack_ts)=?2)",
+            params![channel, thread],
+            |row| row.get(0),
+        )?)
     }
     pub fn accept(&self, incoming: &Incoming, command: bool) -> Result<Option<Accepted>> {
         let mut c = self.connect()?;
