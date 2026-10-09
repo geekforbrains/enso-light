@@ -1,9 +1,7 @@
 name: Check
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # Called by Release; ordinary pushes and PRs use local validation.
   workflow_call:
     inputs:
       plan:

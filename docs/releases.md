@@ -6,6 +6,14 @@ notes. Windows and crates.io publication are not supported.
 
 ## During development
 
+GitHub Actions run only when a release tag is pushed. Ordinary branch pushes
+and pull requests do not start workflows; run the local checks in
+[Runtime and development](runtime.md#develop) before committing and pushing.
+`ci.yml` is callable only by the Release workflow, which requires its Linux and
+macOS checks before publishing. `pr-run-mode = "skip"` in `dist-workspace.toml`
+also disables release planning on pull requests. This avoids checking the same
+commit twice when `main` and its release tag are pushed together.
+
 Add a concise user-facing entry to `CHANGELOG.md` under `Unreleased` whenever
 behavior changes. Use `Added`, `Changed`, `Fixed`, `Removed`, `Deprecated`, or
 `Security` as needed; omit empty sections. Internal refactoring and routine test
@@ -56,7 +64,8 @@ push, tag, or release. Do not create a release branch or PR unless requested.
    `dist generate`; do not hand-edit its generated release workflow.
 5. Commit the relevant changes using a subject such as `chore: release X.Y.Z`.
    Push `main`, create an annotated `vX.Y.Z` tag on that exact commit, and push
-   only that tag. Do not push all local tags.
+   only that tag. Do not push all local tags. The tag starts validation and
+   publication; the `main` push alone starts no workflow.
 6. Watch the Release workflow through completion. Its reusable Check workflow
    runs formatting, Clippy, tests, and release metadata checks on macOS and
    Linux. cargo-dist builds the four archives and shell installer, then uploads

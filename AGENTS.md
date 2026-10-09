@@ -7,6 +7,8 @@ one Slack delivery path. Avoid adding frameworks or unrelated features.
 
 Follow [the release flow](docs/releases.md) for user-visible changes and release
 requests. It owns changelog maintenance, versioning, validation, and publication.
+GitHub Actions run only for release tags; validate ordinary changes locally
+before committing and pushing. Keep the Linux/macOS checks required for release.
 
 Preserve unrelated work. Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 and `cargo test` before completing code changes. Use Conventional Commits. Do not

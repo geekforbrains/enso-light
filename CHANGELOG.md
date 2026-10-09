@@ -5,6 +5,12 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Explicitly release the daemon lock when startup fails or the service exits,
+  preventing inherited file handles from making an immediate retry report that
+  Enso is already running.
+
 ## [0.3.1] - 2026-10-09
 
 ### Fixed

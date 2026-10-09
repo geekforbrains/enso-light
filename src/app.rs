@@ -24,7 +24,25 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub fn lock(home: &Path) -> Result<File> {
+/// Releases the daemon lock even if a forked child still holds its descriptor.
+pub struct DaemonLock(File);
+
+impl DaemonLock {
+    fn acquire(file: File) -> std::io::Result<Self> {
+        file.try_lock_exclusive()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for DaemonLock {
+    fn drop(&mut self) {
+        // Closing alone leaves flock held until every inherited descriptor
+        // closes. Parallel subprocess launches can delay that until exec.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+pub fn lock(home: &Path) -> Result<DaemonLock> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -32,9 +50,7 @@ pub fn lock(home: &Path) -> Result<File> {
         .write(true)
         .mode(0o600)
         .open(home.join("daemon.lock"))?;
-    file.try_lock_exclusive()
-        .context("Enso is already running")?;
-    Ok(file)
+    DaemonLock::acquire(file).context("Enso is already running")
 }
 pub fn is_running(home: &Path) -> bool {
     let Ok(file) = OpenOptions::new()
@@ -44,7 +60,7 @@ pub fn is_running(home: &Path) -> bool {
     else {
         return false;
     };
-    file.try_lock_exclusive().is_err()
+    DaemonLock::acquire(file).is_err()
 }
 fn scrub(text: &str, loaded: &Loaded) -> String {
     let mut result = text.to_owned();
@@ -75,7 +91,7 @@ struct Event {
 fn prepare(
     home: &Path,
     job_errors: &mut HashMap<String, String>,
-) -> Result<(Loaded, File, Db, Vec<String>)> {
+) -> Result<(Loaded, DaemonLock, Db, Vec<String>)> {
     let loaded = config::load(home)?;
     loaded.validate()?;
     let lock = lock(home)?;

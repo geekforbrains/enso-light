@@ -72,6 +72,10 @@ than automatically duplicated.
 
 ## Develop
 
+Run these checks locally before committing and pushing. GitHub Actions repeat
+the validation on Linux and macOS for release tags only; ordinary pushes and
+pull requests do not run CI. See the [release flow](releases.md).
+
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
@@ -83,3 +87,8 @@ Use a temporary home and fake CLI processes for tests. Keep Slack fixtures local
 live integration tests require configured credentials. Normal tests must not
 change the installed home or consume real Slack events. Keep changes small and
 update the owning documentation alongside behavior.
+
+The daemon lock is explicitly unlocked when its guard is dropped. Closing the
+file alone can leave the lock held by a descriptor inherited during a concurrent
+subprocess launch, causing an immediate startup retry to report that Enso is
+already running. The same guard releases temporary status-check locks.

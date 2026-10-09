@@ -1428,6 +1428,24 @@ fn delivered_agent_messages_join_channel_threads_without_a_mention() {
 }
 
 #[test]
+fn daemon_lock_releases_even_with_an_inherited_descriptor() {
+    let home = tempfile::tempdir().unwrap();
+    let guard = lock(home.path()).unwrap();
+    // fork() shares the open file description, just as try_clone() does. A
+    // parallel subprocess can retain it briefly until its close-on-exec runs.
+    let inherited = guard.0.try_clone().unwrap();
+    assert!(is_running(home.path()));
+    assert!(lock(home.path()).is_err());
+    drop(guard);
+    assert!(!is_running(home.path()));
+    let next = lock(home.path()).unwrap();
+    drop(inherited);
+    assert!(is_running(home.path()));
+    drop(next);
+    assert!(!is_running(home.path()));
+}
+
+#[test]
 fn startup_checks_the_database_first_and_tolerates_unusable_workspaces_and_jobs() {
     let home = tempfile::tempdir().unwrap();
     config::init(home.path()).unwrap();
