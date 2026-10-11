@@ -224,11 +224,14 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
                 completed = true;
             }
             ("claude", "result") => {
-                ensure!(!completed, "invalid_output: CLI emitted multiple results");
-                text = event["result"]
+                let result = event["result"]
                     .as_str()
-                    .context("invalid_output: missing result text")?
-                    .into();
+                    .context("invalid_output: missing result text")?;
+                // Background task notifications can start more turns in one invocation.
+                if completed {
+                    text.push_str("\n\n");
+                }
+                text.push_str(result);
                 completed = true;
             }
             _ => {}
@@ -496,6 +499,123 @@ mod tests {
         );
         assert!(parse_output("codex", r#"{"type":"turn.completed"}"#, None).is_err());
         assert!(parse_output("codex", "not json", None).is_err());
+    }
+
+    fn claude_result(text: &str) -> Value {
+        serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "session_id": SESSION, "result": text
+        })
+    }
+
+    fn stream(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn claude_background_turns_preserve_all_replies_and_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let replies = [
+            "Waiting for research.",
+            "The full answer.",
+            "A later follow-up.",
+        ];
+        for count in [2, 3] {
+            let mut events = Vec::new();
+            for reply in &replies[..count] {
+                events.push(serde_json::json!({
+                    "type": "system", "subtype": "init", "session_id": SESSION
+                }));
+                events.push(claude_result(reply));
+                events.push(serde_json::json!({
+                    "type": "system", "subtype": "task_notification", "session_id": SESSION
+                }));
+            }
+            let script = format!("cat >/dev/null\ncat <<'JSON'\n{}\nJSON", stream(&events));
+            let result = execute(
+                request(temp.path(), "claude", &script),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.text, replies[..count].join("\n\n"));
+            assert_eq!(result.session_id.as_deref(), Some(SESSION));
+        }
+    }
+
+    #[test]
+    fn claude_errors_in_any_result_fail_the_whole_run() {
+        for position in 0..3 {
+            for (subtype, is_error) in [("success", true), ("error_during_execution", false)] {
+                let mut events = vec![claude_result("reply"); 3];
+                events[position]["subtype"] = subtype.into();
+                events[position]["is_error"] = is_error.into();
+                let error = parse_output("claude", &stream(&events), None).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "claude reported an error; see enso service logs"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_later_turns_still_validate_session_and_result_text() {
+        let first = claude_result("first");
+        let second = claude_result("second");
+        let other_session = "00000000-0000-0000-0000-000000000002";
+        for kind in ["result", "system"] {
+            let mut changed = claude_result("third");
+            changed["type"] = kind.into();
+            changed["session_id"] = other_session.into();
+            let events = [first.clone(), second.clone(), changed];
+            assert!(
+                parse_output("claude", &stream(&events), None)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("session_unavailable:")
+            );
+        }
+        let output = stream(&[first.clone(), second.clone()]);
+        assert!(parse_output("claude", &output, Some(SESSION)).is_ok());
+        assert!(
+            parse_output("claude", &output, Some(other_session))
+                .unwrap_err()
+                .to_string()
+                .starts_with("session_unavailable:")
+        );
+        let mut missing_text = claude_result("third");
+        missing_text.as_object_mut().unwrap().remove("result");
+        assert_eq!(
+            parse_output("claude", &stream(&[first, second, missing_text]), None)
+                .unwrap_err()
+                .to_string(),
+            "invalid_output: missing result text"
+        );
+    }
+
+    #[test]
+    fn codex_keeps_last_message_and_rejects_multiple_completed_turns() {
+        let mut events = vec![
+            serde_json::json!({"type":"thread.started","thread_id":SESSION}),
+            serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":"Working."}}),
+            serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":"Done."}}),
+            serde_json::json!({"type":"turn.completed"}),
+        ];
+        let result = parse_output("codex", &stream(&events), None).unwrap();
+        assert_eq!(result.text, "Done.");
+        assert_eq!(result.session_id.as_deref(), Some(SESSION));
+        events.push(serde_json::json!({"type":"turn.completed"}));
+        assert_eq!(
+            parse_output("codex", &stream(&events), None)
+                .unwrap_err()
+                .to_string(),
+            "invalid_output: CLI emitted multiple results"
+        );
     }
 
     #[tokio::test]

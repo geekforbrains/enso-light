@@ -40,6 +40,14 @@ missing workspace directory, an executable that cannot be launched, unreadable
 CLI output, a failed attachment download, or a failed hook, are reported as
 they are.
 
+Claude Code can finish several turns in one CLI invocation when background
+commands or subagents are still running. Enso waits for the CLI to exit and joins
+each successful result's text in order with a blank line, including interim
+waiting messages and later follow-ups. An error in any result fails the run, and
+all reported session IDs must match. The configured run timeout still applies to
+the whole invocation, including time spent waiting for background work. To turn
+off Claude background tasks, see [configuration](configuration.md#claude-code-background-tasks).
+
 ## Prompt context
 
 Enso adds no instructions of its own; guidance lives in the home's `AGENTS.md`,

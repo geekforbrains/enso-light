@@ -121,6 +121,20 @@ configuration. Workspaces inside the Enso home are in its repository; for a
 workspace elsewhere, trust the folder in Codex or add `--skip-git-repo-check` to
 the provider's `args`.
 
+#### Claude Code background tasks
+
+Claude Code print mode can stay open after its first reply while background
+commands or subagents finish. Their notifications can start additional turns.
+Enso waits for the CLI to exit and joins all successful replies in order; a late
+error still fails the run. Long foreground Bash commands can also move to the
+background automatically when they reach the tool's timeout.
+
+To disable this behavior, add `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` to the
+Enso home's `.env` and run `enso service restart`. Claude then disables background
+tasks, including automatic backgrounding; a foreground command that reaches its
+timeout stops instead. Enso does not set this variable itself. See the
+[Claude Code tool reference](https://code.claude.com/docs/en/tools-reference#foreground-commands-that-move-to-the-background).
+
 ### workspaces
 
 Each workspace is a named directory where agents run; define at least one.
