@@ -5,6 +5,15 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-22
+
+### Security
+
+- HTTPS connections no longer trust certificates issued by the compromised
+  eMudhra intermediate CAs. Updated the bundled root store (`webpki-roots`
+  1.0.10) and certificate verification (`rustls-webpki` 0.103.16). See the
+  [eMudhra disclosure](https://emudhra.we-have-a-problem.com/).
+
 ## [0.3.3] - 2026-10-11
 
 ### Fixed
@@ -341,7 +350,8 @@ First public release of Enso Light, the standalone Rust Slack-to-CLI service.
 - This release does not migrate homes from the previous Python Enso project.
   Initialize a separate home when moving from that application.
 
-[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/geekforbrains/enso-light/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/geekforbrains/enso-light/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/geekforbrains/enso-light/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/geekforbrains/enso-light/compare/v0.3.0...v0.3.1
