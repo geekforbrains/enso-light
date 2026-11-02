@@ -340,7 +340,10 @@ Only one service should consume the same Socket Mode app token. Enso records
 each Slack message's channel and timestamp, so duplicate deliveries (including
 a mention sent as both `message` and `app_mention`) are handled once. Use
 `enso service status` to check both the service and Slack connection; process
-startup alone is not a successful Slack connection.
+startup alone is not a successful Slack connection. `"slack": "connected"` means
+the current connection completed its handshake and has not gone 30 seconds
+without receiving anything; a silent connection is reported as `disconnected`
+while Enso reconnects. See [Slack connection](runtime.md#slack-connection).
 
 The [Slack CLI commands](cli.md#slack-lookup-and-reactions) use the bot token for
 channel/user lookup, history, threads, links, and reactions, so they need the

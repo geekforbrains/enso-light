@@ -5,6 +5,16 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- A Slack connection that stops delivering anything without closing, for
+  example after a host pause or network change, is now replaced within about 30
+  seconds. Enso logs `Slack connection: …`, reports `"slack": "disconnected"`
+  while it reconnects, and resumes receiving messages. Previously the bot could
+  stop receiving messages until restarted while `enso service status` still
+  reported `connected`. Messages sent during such an outage are not recovered.
+  See [Slack connection](https://github.com/geekforbrains/enso-light/blob/v0.3.5/docs/runtime.md#slack-connection).
+
 ## [0.3.4] - 2026-10-22
 
 ### Security

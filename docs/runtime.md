@@ -68,6 +68,19 @@ previous context, with their time, until a turn that included them succeeds.
 Names and filenames are data; serialization never turns them into shell code.
 Credentials are never part of prompt context.
 
+## Slack connection
+
+Slack pings the Socket Mode connection about every 10 seconds, and any frame
+shows that the connection is alive. After a host pause, migration, or network
+change, the operating system can keep a dead connection open without an error.
+If no frame arrives for 30 seconds, Enso logs `Slack connection: Slack Socket
+Mode received nothing for 30 seconds`, reports `"slack": "disconnected"` in
+`enso service status`, and reconnects. It waits 1 second before reconnecting
+and doubles the wait after each failed attempt, up to 30 seconds. Slack also
+asks for a fresh connection every few hours; Enso reconnects without a log
+entry. Messages sent while the connection is down may never arrive, so senders
+may need to resend them.
+
 ## Restart behavior
 
 On startup, unfinished runs are marked interrupted instead of being automatically

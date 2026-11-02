@@ -10,13 +10,21 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
+};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 use crate::config::{Config, Destination, Mention, Tokens};
 
 const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_FILES: usize = 20;
+/// Slack pings Socket Mode connections about every 10 seconds, and its own
+/// client reconnects after 30 seconds without a ping. A connection that
+/// delivers no frame for this long is treated as dead, even if TCP still
+/// reports it established.
+const SOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Select ring as the process TLS provider before any Socket Mode connection.
 /// Dependencies enable both rustls backends, so rustls cannot choose one itself
@@ -37,8 +45,9 @@ pub struct Identity {
     pub team_id: String,
 }
 
-pub struct Socket {
-    socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+/// Tests use an in-memory stream so paused time cannot outrun socket delivery.
+pub struct Socket<S = MaybeTlsStream<TcpStream>> {
+    socket: WebSocketStream<S>,
 }
 
 pub struct Envelope {
@@ -658,9 +667,20 @@ fn safe_filename(name: &str) -> String {
     }
 }
 
-impl Socket {
+impl<S: AsyncRead + AsyncWrite + Unpin> Socket<S> {
+    /// Every received frame restarts the idle deadline, so Slack's pings keep
+    /// a healthy connection open while a silent one fails within the timeout.
     pub async fn next(&mut self) -> Result<Option<Envelope>> {
-        while let Some(message) = self.socket.next().await {
+        loop {
+            let message = match tokio::time::timeout(SOCKET_IDLE_TIMEOUT, self.socket.next()).await
+            {
+                Ok(Some(message)) => message,
+                Ok(None) => return Ok(None),
+                Err(_) => bail!(
+                    "Slack Socket Mode received nothing for {} seconds",
+                    SOCKET_IDLE_TIMEOUT.as_secs()
+                ),
+            };
             match message.map_err(|_| anyhow!("Slack Socket Mode disconnected"))? {
                 Message::Text(text) => {
                     let value: Value =
@@ -685,7 +705,6 @@ impl Socket {
                 _ => {}
             }
         }
-        Ok(None)
     }
 
     pub async fn ack(&mut self, id: &str) -> Result<()> {
@@ -1344,13 +1363,29 @@ mod tests {
         assert!(private_file(&file).await.is_err());
     }
 
+    /// Connects a client `Socket` to an in-memory WebSocket server running
+    /// `serve`. Writes wake the reader at once, so paused time advances only
+    /// when no frame is in flight.
+    async fn local_socket<F, S>(
+        serve: S,
+    ) -> (Socket<tokio::io::DuplexStream>, tokio::task::JoinHandle<()>)
+    where
+        S: FnOnce(WebSocketStream<tokio::io::DuplexStream>) -> F + Send + 'static,
+        F: Future<Output = ()> + Send,
+    {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            serve(tokio_tungstenite::accept_async(server).await.unwrap()).await;
+        });
+        let (socket, _) = tokio_tungstenite::client_async("ws://localhost/", client)
+            .await
+            .unwrap();
+        (Socket { socket }, server)
+    }
+
     #[tokio::test]
     async fn socket_handles_hello_ping_ack_and_disconnect() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut socket, server) = local_socket(|mut socket| async move {
             socket
                 .send(Message::Text(json!({"type":"hello"}).to_string().into()))
                 .await
@@ -1380,15 +1415,68 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-        });
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
-            .await
-            .unwrap();
-        let mut socket = Socket { socket };
+        })
+        .await;
         let envelope = socket.next().await.unwrap().unwrap();
         assert_eq!(envelope.envelope_id, "E1");
         socket.ack(&envelope.envelope_id).await.unwrap();
         assert!(socket.next().await.unwrap().is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn socket_fails_when_the_connection_goes_silent() {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (mut socket, server) = local_socket(|mut socket| async move {
+            socket
+                .send(Message::Text(json!({"type":"hello"}).to_string().into()))
+                .await
+                .unwrap();
+            // Stay connected without sending frames or closing, like a dead route.
+            let _ = released.await;
+        })
+        .await;
+        let start = tokio::time::Instant::now();
+        let Err(error) = tokio::time::timeout(SOCKET_IDLE_TIMEOUT * 4, socket.next())
+            .await
+            .expect("a silent connection must not wait forever")
+        else {
+            panic!("a silent connection must fail");
+        };
+        assert!(start.elapsed() >= SOCKET_IDLE_TIMEOUT);
+        assert_eq!(
+            error.to_string(),
+            "Slack Socket Mode received nothing for 30 seconds"
+        );
+        drop(release);
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn socket_frames_keep_a_quiet_connection_open() {
+        // Slack's ping cadence; together the gaps exceed the idle timeout.
+        let gap = SOCKET_IDLE_TIMEOUT / 3;
+        let (mut socket, server) = local_socket(move |mut socket| async move {
+            let frames = [
+                Message::Text(json!({"type":"hello"}).to_string().into()),
+                Message::Ping(vec![1].into()),
+                Message::Pong(vec![2].into()),
+                Message::Ping(vec![3].into()),
+                Message::Text(json!({"envelope_id":"E1","payload":{}}).to_string().into()),
+            ];
+            for frame in frames {
+                tokio::time::sleep(gap).await;
+                socket.send(frame).await.unwrap();
+            }
+            // Stay open until the acknowledgement, reading the pongs on the way.
+            while !socket.next().await.unwrap().unwrap().is_text() {}
+        })
+        .await;
+        let start = tokio::time::Instant::now();
+        let envelope = socket.next().await.unwrap().unwrap();
+        assert_eq!(envelope.envelope_id, "E1");
+        assert!(start.elapsed() > SOCKET_IDLE_TIMEOUT);
+        socket.ack(&envelope.envelope_id).await.unwrap();
         server.await.unwrap();
     }
 }
