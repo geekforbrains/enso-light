@@ -5,6 +5,8 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-11-02
+
 ### Fixed
 
 - A Slack connection that stops delivering anything without closing, for
@@ -360,7 +362,8 @@ First public release of Enso Light, the standalone Rust Slack-to-CLI service.
 - This release does not migrate homes from the previous Python Enso project.
   Initialize a separate home when moving from that application.
 
-[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/geekforbrains/enso-light/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/geekforbrains/enso-light/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/geekforbrains/enso-light/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/geekforbrains/enso-light/compare/v0.3.1...v0.3.2
