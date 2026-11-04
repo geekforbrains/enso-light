@@ -5,6 +5,8 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-04
+
 ### Fixed
 
 - When Claude Code is logged out or its login has expired, chat replies and run
@@ -371,7 +373,8 @@ First public release of Enso Light, the standalone Rust Slack-to-CLI service.
 - This release does not migrate homes from the previous Python Enso project.
   Initialize a separate home when moving from that application.
 
-[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/geekforbrains/enso-light/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/geekforbrains/enso-light/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/geekforbrains/enso-light/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/geekforbrains/enso-light/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/geekforbrains/enso-light/compare/v0.3.2...v0.3.3
