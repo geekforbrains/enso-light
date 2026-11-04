@@ -67,7 +67,9 @@ Service installation uses launchd on macOS and systemd user services on Linux.
 It enables startup at login; `start` runs it now. Linux operation after logout
 requires your OS user's normal lingering/session configuration. Installation
 captures `HOME`, `PATH`, and native CLI configuration paths so the service can
-find the same authenticated CLI. Secrets stay in `.env` and are read at runtime;
+find the same authenticated CLI. If a run reports that Claude isn't logged in,
+run `claude auth login` as that user with the same configuration path; see
+[runtime](runtime.md). Secrets stay in `.env` and are read at runtime;
 installation requires `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` there; see
 [checking configuration](#checking-configuration).
 Reinstall if the Enso executable or the relevant `PATH` changes. Uninstall stops

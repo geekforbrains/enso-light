@@ -32,8 +32,14 @@ Codex, the turn fails and `!clear` starts a fresh one. Jobs start a fresh
 session every run.
 
 When the CLI fails, the run's error, which is also the Slack reply, says only
-that it exited with a status or reported an error, or that its session could not
-be resumed and `!clear` starts fresh. The error events the CLI printed on stdout
+that it exited with a status or reported an error, that Claude Code isn't logged
+in, or that its session could not be resumed and `!clear` starts fresh. Enso
+recognizes a missing or expired Claude Code login from the CLI's structured
+output and reports ``Claude isn't logged in. Run `claude auth login` on the Enso
+host.`` Log in as the user the service runs as, with the same
+`CLAUDE_CONFIG_DIR` if one is set, and check it with `claude auth status`. Then
+resend the message; the conversation keeps its session. Enso does not retry the
+run or switch to other credentials. The error events the CLI printed on stdout
 and the end of its stderr go to the service log (`enso service logs`), with
 `.env` values and Slack tokens redacted. Failures in Enso's own steps, such as a
 missing workspace directory, an executable that cannot be launched, unreadable

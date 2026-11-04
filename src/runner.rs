@@ -17,6 +17,7 @@ use crate::config::Provider;
 
 const MAX_STDOUT: usize = 16 * 1024 * 1024;
 const MAX_STDERR: usize = 1024 * 1024;
+const CLAUDE_LOGIN: &str = "Claude isn't logged in. Run `claude auth login` on the Enso host.";
 
 pub struct Request {
     pub workspace: PathBuf,
@@ -87,17 +88,23 @@ pub async fn execute(request: Request, cancel: CancellationToken) -> Result<Outc
             |code| format!("status {code}"),
         );
         // Both CLIs exit non-zero on most failures and explain them in a stdout event.
-        let events: Vec<&str> = output
-            .stdout
-            .lines()
-            .filter(|line| {
-                serde_json::from_str::<Value>(line)
-                    .is_ok_and(|event| is_error(&request.settings.cli, &event))
-            })
-            .collect();
+        let cli = &request.settings.cli;
+        let mut login = false;
+        let mut events = Vec::new();
+        for line in output.stdout.lines() {
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let login_error = is_login_error(cli, &event);
+            login |= login_error;
+            if login_error || is_error(cli, &event) {
+                events.push(line);
+            }
+        }
         return Err(failure(
-            format!("{} exited with {status}", request.settings.cli),
+            format!("{cli} exited with {status}"),
             &format!("{}\n{}", output.stderr, events.join("\n")),
+            login,
         ));
     }
     parse_output(
@@ -185,6 +192,7 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
     let mut text = String::new();
     let mut session_id: Option<String> = None;
     let mut completed = false;
+    let mut login = false;
     for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
         let event: Value = serde_json::from_str(line)
             .map_err(|_| anyhow!("invalid_output: CLI emitted invalid JSON"))?;
@@ -209,8 +217,9 @@ fn parse_output(cli: &str, stdout: &str, expected_session: Option<&str>) -> Resu
             );
             session_id = Some(id.into());
         }
+        login |= is_login_error(cli, &event);
         if is_error(cli, &event) {
-            return Err(failure(format!("{cli} reported an error"), line));
+            return Err(failure(format!("{cli} reported an error"), line, login));
         }
         match (cli, kind) {
             ("codex", "item.completed") if event["item"]["type"] == "agent_message" => {
@@ -258,11 +267,30 @@ fn is_error(cli: &str, event: &Value) -> bool {
     }
 }
 
+/// Claude reports a missing or expired login as a synthetic API error: an assistant
+/// message marked `authentication_failed`, then an error result. Only these
+/// structured events count, never free text such as stderr or a tool's output.
+fn is_login_error(cli: &str, event: &Value) -> bool {
+    match (cli, event["type"].as_str()) {
+        ("claude", Some("assistant")) => event["error"] == "authentication_failed",
+        ("claude", Some("result")) if is_error(cli, event) => {
+            event["result"].as_str().is_some_and(|text| {
+                ["Failed to authenticate", "Not logged in"]
+                    .iter()
+                    .any(|prefix| text.starts_with(prefix))
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Builds a failure from the CLI's output. Slack users only need to know when to
-/// `!clear`; everything else the CLI said goes to the service log.
-fn failure(message: String, output: &str) -> anyhow::Error {
+/// log in or `!clear`; everything else the CLI said goes to the service log.
+fn failure(message: String, output: &str, login: bool) -> anyhow::Error {
     let lower = output.to_ascii_lowercase();
-    let message = if [
+    let message = if login {
+        CLAUDE_LOGIN.into()
+    } else if [
         "no rollout found",
         "no conversation found",
         "no conversation session",
@@ -783,6 +811,119 @@ exit 1"#,
                 .unwrap_err()
                 .to_string()
                 .starts_with("session_unavailable:")
+        );
+    }
+
+    /// What Claude Code prints, exiting 1, when its login is missing or expired.
+    fn logged_out(text: &str, assistant: bool) -> String {
+        let mut events = Vec::new();
+        if assistant {
+            events.push(serde_json::json!({
+                "type": "assistant", "session_id": SESSION, "error": "authentication_failed",
+                "is_api_error_message": true,
+                "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+            }));
+        }
+        // `subtype` says success even though the result is an error.
+        events.push(serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": true, "session_id": SESSION,
+            "result": text, "terminal_reason": "api_error", "api_error_status": null
+        }));
+        stream(&events)
+    }
+
+    #[tokio::test]
+    async fn claude_login_failures_say_how_to_log_in() {
+        assert_eq!(
+            CLAUDE_LOGIN,
+            "Claude isn't logged in. Run `claude auth login` on the Enso host."
+        );
+        let temp = tempfile::tempdir().unwrap();
+        for (text, assistant) in [
+            (
+                "Failed to authenticate: OAuth session expired and could not be refreshed",
+                false,
+            ),
+            ("Not logged in · Please run /login", true),
+            // The assistant's error code is enough, whatever the result says.
+            ("An unfamiliar login message", true),
+        ] {
+            let output = logged_out(text, assistant);
+            let script = format!("cat >/dev/null\ncat <<'JSON'\n{output}\nJSON\nexit 1");
+            let failed = execute(
+                request(temp.path(), "claude", &script),
+                CancellationToken::new(),
+            )
+            .await;
+            // A zero exit with the same events is handled the same way.
+            for error in [
+                failed.unwrap_err(),
+                parse_output("claude", &output, None).unwrap_err(),
+            ] {
+                assert_eq!(error.to_string(), CLAUDE_LOGIN, "{text}");
+                assert!(
+                    error
+                        .downcast_ref::<Failure>()
+                        .unwrap()
+                        .detail
+                        .contains(text)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn only_claude_login_errors_get_login_advice() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut other = claude_result("GitHub request failed: Not logged in private-detail");
+        other["is_error"] = true.into();
+        let script = format!("cat >/dev/null\necho 'Not logged in' >&2\necho '{other}'\nexit 1");
+        let error = execute(
+            request(temp.path(), "claude", &script),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "claude exited with status 1; see enso service logs"
+        );
+        assert!(
+            error
+                .downcast_ref::<Failure>()
+                .unwrap()
+                .detail
+                .contains("private-detail")
+        );
+        assert_eq!(
+            parse_output("claude", &other.to_string(), None)
+                .unwrap_err()
+                .to_string(),
+            "claude reported an error; see enso service logs"
+        );
+        // A reply that happens to start with the same words is still a reply.
+        let text = "Not logged in to GitHub, so I used the cached copy.";
+        assert_eq!(
+            parse_output("claude", &claude_result(text).to_string(), None)
+                .unwrap()
+                .text,
+            text
+        );
+        let codex = r#"{"type":"error","message":"Not logged in"}"#;
+        let script = format!("cat >/dev/null\necho '{codex}'\nexit 1");
+        assert_eq!(
+            execute(
+                request(temp.path(), "codex", &script),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "codex exited with status 1; see enso service logs"
+        );
+        assert_eq!(
+            parse_output("codex", codex, None).unwrap_err().to_string(),
+            "codex reported an error; see enso service logs"
         );
     }
 

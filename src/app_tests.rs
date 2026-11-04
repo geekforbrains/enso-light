@@ -296,6 +296,52 @@ async fn failed_provider_still_calls_postrun_with_safe_error_and_job_failure() {
 }
 
 #[tokio::test]
+async fn claude_login_failures_reach_chat_and_jobs_and_keep_the_session() {
+    let fixture = Fixture::new(false);
+    let (second, resumed, conversation) = resumable(&fixture).await;
+    let logged_out = fixture.home.path().join("logged-out-claude");
+    fs::write(
+        &logged_out,
+        format!(
+            "#!/bin/bash\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"session_id\":\"{SESSION}\",\"result\":\"Failed to authenticate: OAuth session expired and could not be refreshed\",\"terminal_reason\":\"api_error\",\"api_error_status\":null}}'\nexit 1\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&logged_out, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut loaded = fixture.loaded.clone();
+    loaded.config.providers.get_mut("main").unwrap().executable =
+        Some(logged_out.to_string_lossy().into());
+    let message = "Claude isn't logged in. Run `claude auth login` on the Enso host.";
+    let (state, _, error, _) = fixture.finish(&resumed, Some(&second), &loaded).await;
+    assert_eq!(
+        (state.as_str(), error.as_deref()),
+        ("failed", Some(message))
+    );
+    assert_eq!(fixture.db.run(&resumed.id).unwrap()["error"], message);
+    // Logging in again is enough: the conversation resumes where it left off.
+    assert_eq!(
+        fixture.db.conversation_status(&conversation).unwrap()["has_session"],
+        true
+    );
+    let (run, directory) = fixture.job("report", "Report.", "cat >/dev/null\n");
+    execute(
+        fixture.home.path(),
+        &fixture.db,
+        &fixture.slack,
+        &loaded,
+        &run,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixture.db.run(&run.id).unwrap()["error"], message);
+    assert_eq!(
+        json_file(&directory.join("postrun-input.json"))["error"],
+        message
+    );
+}
+
+#[tokio::test]
 async fn prerun_skip_does_not_invoke_provider_postrun_or_prompt_interpolation() {
     let fixture = Fixture::new(false);
     let (run, directory) = fixture.job(

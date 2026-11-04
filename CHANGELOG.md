@@ -5,6 +5,15 @@ Versioning and publication follow the [release flow](docs/releases.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- When Claude Code is logged out or its login has expired, chat replies and run
+  errors now say "Claude isn't logged in. Run `claude auth login` on the Enso
+  host." instead of `claude exited with status 1; see enso service logs`. Log in
+  as the user the service runs as, then resend the message; the conversation
+  keeps its session. Other CLI failures still report the generic error. See
+  [Runtime](https://github.com/geekforbrains/enso-light/blob/v0.3.6/docs/runtime.md).
+
 ## [0.3.5] - 2026-11-02
 
 ### Fixed
